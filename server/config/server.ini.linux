@@ -1,0 +1,51 @@
+# =============================================================================
+#  Inverted TaskFlow Server - settings  (/etc/taskflow/server.ini)
+#  After a change:  sudo systemctl restart taskflow
+#  Lines starting with # are comments. Unknown settings are reported in the log.
+# =============================================================================
+
+# ---- network
+bind = 0.0.0.0
+port = 8443
+# HTTPS certificate (created by install_server.sh; replace with your own if you have one)
+tls_cert = /etc/taskflow/cert.pem
+tls_key = /etc/taskflow/key.pem
+# desktop apps connected at the same time (each keeps one instant-update connection open)
+max_clients = 300
+# requests per second allowed from one computer (protects against floods and scripts)
+rate_limit_per_ip = 30
+
+# ---- storage
+database = /var/lib/taskflow/taskflow.db
+backup_dir = /var/lib/taskflow/backups
+# daily backup time (24 h, server clock) and how many daily backups to keep
+backup_time = 02:00
+backup_keep = 30
+log_file = /var/log/taskflow/server.log
+
+# ---- company (shown on the sign-in page; can also be changed in the app: Administration > Server)
+company_name = Inverted Energy Pvt. Ltd.
+company_tagline = Projects - Tasks - Timelines
+
+# ---- sign-in
+# sessions end after this many hours, or days with "keep me signed in"
+session_hours = 12
+remember_days = 30
+# first administrator (used only when the database is created). Leave the password empty:
+# a random one is written to /var/lib/taskflow/initial_admin_password.txt
+admin_email = admin@taskflow.local
+admin_password =
+# desktop apps older than this version are asked to update
+min_client_version = 1.0.0
+
+# ---- e-mail notifications (optional) - test with:  taskflowctl test-email you@inverted.in
+email_enabled = 0
+smtp_host = smtp.office365.com
+smtp_port = 587
+# starttls (port 587) | ssl (port 465) | none (internal relay, port 25)
+smtp_security = starttls
+smtp_user = taskflow@inverted.in
+smtp_password =
+smtp_from = taskflow@inverted.in
+smtp_from_name = Inverted TaskFlow
+smtp_verify_cert = 1

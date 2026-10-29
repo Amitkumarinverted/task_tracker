@@ -1,0 +1,152 @@
+#!/bin/bash
+# =============================================================================
+#  taskflowctl - day-to-day administration of the Inverted TaskFlow server
+#
+#    taskflowctl status                 is it running? version, users, last backup, disk
+#    taskflowctl logs [-f]              show (or follow) the server log
+#    taskflowctl start|stop|restart
+#    taskflowctl backup                 write a backup now
+#    taskflowctl backups                list backups
+#    taskflowctl restore FILE           restore a backup (stops and restarts the server)
+#    taskflowctl check                  full database integrity check
+#    taskflowctl reset-password EMAIL   set a temporary password and print it
+#    taskflowctl fingerprint            print the certificate fingerprint for the desktop apps
+#    taskflowctl test-email ADDRESS     send a test e-mail with the [e-mail] settings
+#    taskflowctl update PACKAGE.zip     install a new server version (backs up and rolls back on failure)
+#    taskflowctl edit                   edit the settings, then restart
+# =============================================================================
+set -euo pipefail
+
+INI=/etc/taskflow/server.ini
+BIN=/opt/taskflow/TaskFlowServer
+DATA=/var/lib/taskflow
+LOG=/var/log/taskflow/server.log
+
+# the data, log and certificate are readable only by root and the service: elevate once, up front
+if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+
+need_root() { [ "$(id -u)" -eq 0 ] || { echo "Please run with sudo:  sudo taskflowctl $*"; exit 1; }; }
+setting() { grep -E "^\s*$1\s*=" "$INI" | tail -1 | sed -E 's/^[^=]*=\s*//; s/\s+$//' || true; }
+as_service() { runuser -u taskflow -- "$@"; }
+port() { setting port; }
+health() { curl -fsk --max-time 5 "https://127.0.0.1:$(port)/api/v1/health" 2>/dev/null || curl -fs --max-time 5 "http://127.0.0.1:$(port)/api/v1/health" 2>/dev/null; }
+
+cmd="${1:-status}"
+shift || true
+case "$cmd" in
+  status)
+    systemctl --no-pager --lines=0 status taskflow || true
+    echo
+    if h="$(health)"; then echo "  Health      : OK  $h"; else echo "  Health      : NOT RESPONDING"; fi
+    echo "  Program     : $($BIN --version 2>/dev/null || echo '?')"
+    db="$(setting database)"
+    echo "  Database    : $db  ($(du -ch "$db" "$db-wal" 2>/dev/null | tail -1 | cut -f1))"
+    last="$(ls -1t "$(setting backup_dir)"/taskflow-*.db 2>/dev/null | head -1 || true)"
+    echo "  Last backup : ${last:-none yet}"
+    echo "  Disk free   : $(df -h "$DATA" | awk 'NR==2{print $4" of "$2}')"
+    ;;
+  logs)
+    if [ "${1:-}" = "-f" ]; then tail -n 50 -f "$LOG"; else tail -n 200 "$LOG"; fi
+    ;;
+  start|stop|restart)
+    need_root "$cmd"
+    systemctl "$cmd" taskflow
+    [ "$cmd" = "stop" ] || { sleep 2; health >/dev/null && echo "running" || echo "not responding yet - see: taskflowctl logs"; }
+    ;;
+  backup)
+    need_root backup
+    as_service "$BIN" --config "$INI" --backup-now
+    ;;
+  backups)
+    ls -lht "$(setting backup_dir)" 2>/dev/null | head -40
+    ;;
+  restore)
+    need_root restore
+    f="${1:-}"
+    [ -f "$f" ] || { echo "Usage: sudo taskflowctl restore /var/lib/taskflow/backups/taskflow-YYYYMMDD-HHMMSS.db"; exit 1; }
+    r="$(sqlite3 "$f" 'PRAGMA integrity_check;' 2>&1 | head -1)"
+    [ "$r" = "ok" ] || { echo "The backup file is damaged ($r) - choose another one."; exit 1; }
+    db="$(setting database)"
+    echo "Restoring $f"
+    echo "  -> the current database is kept as $db.before-restore-<date-time>"
+    read -rp "Continue? The server restarts; the apps reconnect by themselves. [y/N] " a
+    [ "${a,,}" = "y" ] || exit 1
+    keep="$db.before-restore-$(date +%Y%m%d-%H%M%S)"
+    systemctl stop taskflow
+    cp -p "$db" "$keep" 2>/dev/null || true
+    [ -f "$db-wal" ] && cp -p "$db-wal" "$keep-wal"   # changes not yet merged into the main file
+    rm -f "$db-wal" "$db-shm"
+    install -o taskflow -g taskflow -m 0640 "$f" "$db"
+    systemctl start taskflow
+    sleep 2
+    health >/dev/null && echo "Restored and running." || echo "Server not responding - see: taskflowctl logs"
+    ;;
+  check)
+    need_root check
+    as_service "$BIN" --config "$INI" --check
+    ;;
+  reset-password)
+    need_root reset-password
+    [ -n "${1:-}" ] || { echo "Usage: sudo taskflowctl reset-password name@inverted.in"; exit 1; }
+    as_service "$BIN" --config "$INI" --reset-password "$1"
+    ;;
+  fingerprint)
+    openssl x509 -in "$(setting tls_cert)" -outform DER | sha256sum | awk '{print toupper($1)}' | sed 's/../&:/g; s/:$//'
+    ;;
+  test-email)
+    need_root test-email
+    [ -n "${1:-}" ] || { echo "Usage: sudo taskflowctl test-email you@inverted.in"; exit 1; }
+    as_service "$BIN" --config "$INI" --test-email "$1"
+    ;;
+  update)
+    need_root update
+    pkg="${1:-}"
+    [ -f "$pkg" ] || { echo "Usage: sudo taskflowctl update InvertedTaskFlow_Server_vX.Y.Z.zip"; exit 1; }
+    command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    rc=0; unzip -q -o "$pkg" -d "$tmp" || rc=$?
+    [ "$rc" -le 1 ] || { echo "Could not unpack $pkg (unzip error $rc)."; exit 1; }   # 1 = warnings only
+    root="$(dirname "$(find "$tmp" -path '*/server/CMakeLists.txt' | head -1)")/.."
+    [ -f "$root/server/CMakeLists.txt" ] || { echo "This zip does not contain the server source."; exit 1; }
+    echo "Building the new version..."
+    mem_gb="$(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo)"; jobs="$(nproc)"
+    [ "$mem_gb" -lt "$jobs" ] && jobs="$mem_gb"; [ "$jobs" -lt 1 ] && jobs=1
+    if ! { cmake -S "$root/server" -B "$tmp/build" -DCMAKE_BUILD_TYPE=Release && cmake --build "$tmp/build" -j"$jobs"; } >"$tmp/build.log" 2>&1; then
+      echo "Building the new version failed - nothing was changed. Last lines of the build log:"
+      tail -n 30 "$tmp/build.log"
+      exit 1
+    fi
+    new="$("$tmp/build/TaskFlowServer" --version)"
+    echo "Current: $($BIN --version)   New: $new"
+    echo "Backing up the database first..."
+    as_service "$BIN" --config "$INI" --backup-now
+    cp -p "$BIN" "$BIN.previous"
+    systemctl stop taskflow
+    install -o root -g root -m 0755 "$tmp/build/TaskFlowServer" "$BIN.new"
+    mv -f "$BIN.new" "$BIN"
+    [ -f "$root/deploy/linux/taskflowctl" ] && install -m 0755 "$root/deploy/linux/taskflowctl" /usr/local/bin/taskflowctl
+    systemctl start taskflow
+    for i in $(seq 1 20); do health >/dev/null && break; sleep 1; done
+    if health >/dev/null; then
+      echo "Updated to $new and running."
+    else
+      echo "The new version did not start - rolling back."
+      systemctl stop taskflow
+      cp -p "$BIN.previous" "$BIN"
+      systemctl start taskflow
+      exit 1
+    fi
+    ;;
+  edit)
+    need_root edit
+    "${EDITOR:-nano}" "$INI"
+    systemctl restart taskflow
+    sleep 2
+    health >/dev/null && echo "Restarted with the new settings." || { echo "Not responding - check: taskflowctl logs"; }
+    ;;
+  *)
+    sed -n '2,20p' "$0"
+    exit 1
+    ;;
+esac

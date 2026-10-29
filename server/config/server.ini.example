@@ -1,0 +1,35 @@
+# =============================================================================
+#  Inverted TaskFlow Server - settings (Windows / test).  Restart the server after a change.
+#  Relative paths are relative to the folder of this file.
+# =============================================================================
+bind = 0.0.0.0
+port = 8080
+max_clients = 300
+rate_limit_per_ip = 30
+
+database = taskflow.db
+backup_dir = backups
+backup_time = 02:00
+backup_keep = 30
+log_file = logs\server.log
+
+company_name = Inverted Energy Pvt. Ltd.
+company_tagline = Projects - Tasks - Timelines
+
+session_hours = 12
+remember_days = 30
+admin_email = admin@taskflow.local
+admin_password =
+min_client_version = 1.0.0
+
+# The Windows build has no built-in HTTPS. Use it inside the office network only, or put a TLS
+# reverse proxy in front of it (IT Admin Guide, "Windows Server"). E-mail works with an internal
+# relay (smtp_security = none).
+email_enabled = 0
+smtp_host =
+smtp_port = 25
+smtp_security = none
+smtp_user =
+smtp_password =
+smtp_from = taskflow@inverted.in
+smtp_from_name = Inverted TaskFlow

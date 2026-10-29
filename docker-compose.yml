@@ -1,0 +1,80 @@
+# =============================================================================
+#  Inverted TaskFlow Server - Docker Compose (one server, one SQLite database)
+#    cp .env.example .env   (then edit)        docker compose up -d --build
+#  See DOCKER.md for the first deployment, upgrades, backup and restore.
+# =============================================================================
+name: taskflow
+
+services:
+  taskflow-server:
+    image: ${TASKFLOW_IMAGE:-inverted/taskflow-server}:${TASKFLOW_TAG:-1.0.1}
+    build:
+      context: .
+      target: runtime
+      args:
+        TASKFLOW_UID: ${TASKFLOW_UID:-10001}
+        TASKFLOW_GID: ${TASKFLOW_GID:-10001}
+        BUILD_JOBS: ${BUILD_JOBS:-2}
+    # a fixed name also prevents "docker compose up --scale": SQLite must have exactly one writer
+    container_name: taskflow-server
+    restart: unless-stopped
+    init: true
+    user: "${TASKFLOW_UID:-10001}:${TASKFLOW_GID:-10001}"
+    environment:
+      TZ: ${TASKFLOW_TZ:-Asia/Kolkata}
+      TASKFLOW_ALLOW_HTTP: ${TASKFLOW_ALLOW_HTTP:-0}
+      TASKFLOW_ALLOW_NEW_DB: ${TASKFLOW_ALLOW_NEW_DB:-0}
+    ports:
+      # only the HTTPS API; the container side is always 8443 (server.ini: port = 8443)
+      - "${TASKFLOW_BIND_IP:-0.0.0.0}:${TASKFLOW_PORT:-8443}:8443"
+    volumes:
+      - type: bind
+        source: ${TASKFLOW_CONFIG_DIR:-./taskflow-data/config}
+        target: /etc/taskflow/conf
+        read_only: true
+      - type: bind
+        source: ${TASKFLOW_TLS_DIR:-./taskflow-data/tls}
+        target: /etc/taskflow/tls
+        read_only: true
+      - type: bind
+        source: ${TASKFLOW_DATA_DIR:-./taskflow-data/data}
+        target: /var/lib/taskflow
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -k --max-time 5 https://127.0.0.1:8443/api/v1/health >/dev/null || curl -fsS --max-time 5 http://127.0.0.1:8443/api/v1/health >/dev/null"]
+      interval: 30s
+      timeout: 6s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "${TASKFLOW_CPUS:-2}"
+          memory: ${TASKFLOW_MEMORY:-1g}
+          # the server runs max_clients + 32 threads (332 by default)
+          pids: 1024
+        reservations:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - taskflow
+
+networks:
+  taskflow:
+    driver: bridge

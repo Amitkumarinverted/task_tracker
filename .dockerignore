@@ -1,0 +1,18 @@
+# Only what the image build needs is sent to Docker - never data, settings, keys or backups.
+*
+!common/
+!server/
+!third_party/
+!tests/
+!deploy/docker/server.ini
+!entrypoint.sh
+
+# defence in depth inside the included folders
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.pem
+**/*.key
+**/.env
+**/build/
+**/__pycache__/

@@ -1,0 +1,30 @@
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Database and backups
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# Private TLS keys and certificates
+*.key
+*.pem
+
+# Build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# Logs
+*.log
+logs/
+
+# Windows build artifacts
+*.obj
+*.pdb
+*.ilk
