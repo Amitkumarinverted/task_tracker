@@ -46,7 +46,8 @@ Passwords and keys are never printed.
 | `.env` variable | Default | Effect |
 |---|---|---|
 | `TASKFLOW_IMAGE`, `TASKFLOW_TAG` | `inverted/taskflow-server`, `1.0.1` | image name and tag that is built and run |
-| `TASKFLOW_PORT` | `8443` | port on the **host**; the container side is always 8443 |
+| `TASKFLOW_HOST` | `task.inverted.in` | the name the desktop apps use. Used **only by the entrypoint**: it refuses to start if the certificate does not cover this name, and logs `https://TASKFLOW_HOST:TASKFLOW_PORT` and the certificate fingerprint. It does not change what the server listens on, and it does not set up DNS or create a certificate |
+| `TASKFLOW_PORT` | `8443` | port on the **host** (also the port in the logged client address); the container side is always 8443 |
 | `TASKFLOW_BIND_IP` | `0.0.0.0` | host address the port is published on (set the office-network IP to limit it) |
 | `TASKFLOW_CONFIG_DIR` | `./taskflow-data/config` | host folder with `server.ini` → `/etc/taskflow/conf` (read-only) |
 | `TASKFLOW_TLS_DIR` | `./taskflow-data/tls` | host folder with `cert.pem`, `key.pem` → `/etc/taskflow/tls` (read-only) |
@@ -67,9 +68,75 @@ Passwords and keys are never printed.
 | `log_file` | empty | container output |
 | everything else | as in the IT Admin Guide, chapter 13 | `smtp_password` belongs only in this file - keep it `0640 root:10001` |
 
-## 3. First deployment (Linux host with Docker Engine + Compose plugin)
+## 3. Production name: `https://task.inverted.in:8443`
 
-Example host folders: `/srv/taskflow/{config,tls,data}`; server name `taskflow.inverted.local`.
+Three separate things must agree; the server program itself has no host-name setting (it listens on `0.0.0.0:8443`
+inside the container and answers whatever name was used):
+
+| What | Where it is configured | Production value |
+|---|---|---|
+| DNS record | your DNS provider for `inverted.in` (not in this project) | `task.inverted.in` → the server's IP (an `A` record) |
+| TLS certificate | `TASKFLOW_TLS_DIR/cert.pem` + `key.pem`, loaded by the server from `tls_cert`/`tls_key` | covers `DNS:task.inverted.in` |
+| Desktop app address + pin | `build_installer.bat setup` (`SERVER_URL`, `SERVER_CERT_SHA256`) | `https://task.inverted.in:8443` + the certificate fingerprint |
+
+`TASKFLOW_HOST` / `TASKFLOW_PORT` in `.env` only let the container check the certificate and print these values.
+
+### DNS
+
+- Create (or check) an `A` record `task.inverted.in` → the server's IP. At the time of writing, `task.inverted.in`
+  already resolves publicly to **15.207.128.179** - make sure that is the machine that runs this container.
+- That is a public address: the port is reachable from the internet unless the cloud security group / firewall blocks it
+  (see *Firewall*). For an office-only service, allow only the office and VPN address ranges.
+- If the server should only be reached inside the office/VPN, use an internal DNS zone (split DNS) with the private IP
+  instead of a public record.
+- Check from the server and from an employee PC:
+  ```bash
+  nslookup task.inverted.in            # Windows and Linux
+  dig +short task.inverted.in          # Linux
+  ```
+  PowerShell on a PC: `Resolve-DnsName task.inverted.in` and `Test-NetConnection task.inverted.in -Port 8443`
+
+### HTTPS certificate
+
+The C++ server terminates TLS itself (OpenSSL, TLS 1.2/1.3); no reverse proxy is used or needed.
+
+- The desktop app trusts the server **only by the pinned SHA-256 fingerprint of the whole certificate** (when a pin is
+  built in, it does not check the CA, the name or the expiry date - `client/src/platform_win32.cpp`). So:
+  - Use a **long-lived** certificate: the self-signed one below (10 years, like `install_server.sh`) or one from the company
+    CA. Do **not** use a 90-day public certificate (e.g. Let's Encrypt): every renewal changes the fingerprint and every
+    installed app would refuse to connect until it is reinstalled.
+  - Still put `task.inverted.in` into the certificate (`subjectAltName`) - the entrypoint checks it, and tools such as
+    `curl`, or an app installed without a pin, verify the name.
+- Never disable the pin or switch to plain HTTP to make a connection work - compare fingerprints instead.
+
+### Desktop installer (built on the Windows PC with the client project, `D:\InvertedTaskFlow`)
+
+```bat
+build_installer.bat setup
+   Server address              : https://task.inverted.in:8443
+   Certificate fingerprint     : <the 64-hex value from "docker compose logs" or the openssl command in step 5>
+```
+
+The values are stored only on that PC (`%APPDATA%\InvertedEnergy\TaskFlow\release_config.txt`) and built into
+`InvertedTaskFlow_Setup_vX.Y.Z.exe`; `installer\make_build_config.ps1` accepts addresses of the form
+`https://name:port`. Distribute that installer. Already-installed apps can also be pointed at the new address once on
+the sign-in screen (server settings: address + fingerprint), but a new installer is the reliable way.
+
+### If the certificate (fingerprint) changes
+
+A new key, a renewed certificate or a certificate from another CA all produce a **new fingerprint**:
+
+1. Plan it: create the new certificate first, note its fingerprint, rebuild the installer with it
+   (`build_installer.bat setup`, then build) and have it ready.
+2. Replace `cert.pem`/`key.pem` in `TASKFLOW_TLS_DIR` (owner `root:10001`, key `0640`), then
+   `docker compose restart taskflow-server`, and check the fingerprint in `docker compose logs`.
+3. Distribute the new installer at the same time. Until users update, their apps show "the certificate does not
+   match" - which is exactly what pinning must do; tell users to confirm the new fingerprint only if IT gave it to them.
+4. Keep the old certificate files; if something goes wrong, putting them back restores the old fingerprint.
+
+## 4. First deployment (Linux host with Docker Engine + Compose plugin)
+
+Example host folders: `/srv/taskflow/{config,tls,data}`; server name `task.inverted.in`.
 
 ```bash
 unzip InvertedTaskFlow_Server_v1.0.1.zip && cd InvertedTaskFlow_Server_v1.0.1
@@ -81,8 +148,10 @@ sudo install -o root -g 10001 -m 0640 deploy/docker/server.ini /srv/taskflow/con
 sudo nano /srv/taskflow/config/server.ini        # admin_email, company name, e-mail settings
 
 # 2. HTTPS certificate - the same command install_server.sh uses (EC P-256, 10 years).
-#    Put every name/IP the PCs will use into subjectAltName (use IP:10.0.0.5 for an address).
-HOST=taskflow.inverted.local
+#    Skip this if you already have the certificate the installed apps pin (e.g. /etc/taskflow/*.pem): copy those instead.
+#    Put every name/IP the PCs will use into subjectAltName (e.g. add ,IP:15.207.128.179).
+HOST=task.inverted.in
+[ -e /srv/taskflow/tls/key.pem ] && echo "a key already exists - not overwriting it" || \
 sudo openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
   -keyout /srv/taskflow/tls/key.pem -out /srv/taskflow/tls/cert.pem \
   -subj "/O=Inverted Energy/CN=$HOST" -addext "subjectAltName=DNS:$HOST,DNS:localhost,IP:127.0.0.1"
@@ -90,7 +159,7 @@ sudo chown root:10001 /srv/taskflow/tls/key.pem /srv/taskflow/tls/cert.pem
 sudo chmod 0640 /srv/taskflow/tls/key.pem && sudo chmod 0644 /srv/taskflow/tls/cert.pem
 #    (own certificate from the company CA: copy it to cert.pem / key.pem with the same owner and modes)
 
-# 3. Docker settings
+# 3. Docker settings (TASKFLOW_HOST=task.inverted.in and TASKFLOW_PORT=8443 are already the defaults)
 cp .env.example .env
 sed -i 's|^TASKFLOW_CONFIG_DIR=.*|TASKFLOW_CONFIG_DIR=/srv/taskflow/config|;
         s|^TASKFLOW_TLS_DIR=.*|TASKFLOW_TLS_DIR=/srv/taskflow/tls|;
@@ -103,40 +172,49 @@ docker compose up -d
 docker compose ps                                  # STATUS must become "healthy"
 docker compose logs --tail 50
 
-# 5. values for the desktop installer (build_installer.bat)
-echo "Server address: https://$HOST:8443"
+# 5. values for the desktop installer (build_installer.bat setup) - also printed by the container at start-up
+docker compose logs taskflow-server | grep -E "desktop app server address|certificate fingerprint" | tail -2
 sudo openssl x509 -in /srv/taskflow/tls/cert.pem -outform DER | sha256sum | awk '{print toupper($1)}' | sed 's/../&:/g; s/:$//'
+
+#    verify DNS, port and certificate from the server itself and from an office PC
+dig +short task.inverted.in
+curl -fsS --cacert /srv/taskflow/tls/cert.pem https://task.inverted.in:8443/api/v1/health    # self-signed cert: name + chain checked
+openssl s_client -connect task.inverted.in:8443 -servername task.inverted.in </dev/null 2>/dev/null \
+  | openssl x509 -outform DER | sha256sum                                                      # must equal the fingerprint
 
 # 6. first administrator password: sign in with the desktop app, choose a new password, then delete the file
 sudo cat /srv/taskflow/data/initial_admin_password.txt
 sudo rm /srv/taskflow/data/initial_admin_password.txt
 ```
 
-### Hostname, certificate and the desktop app
+### Address, port and the desktop app
 
-The desktop installer has the **server address** and the **certificate fingerprint** built in (IT Admin Guide, chapter 5).
-Both must stay exactly the same for the life of the installation:
+The desktop installer has the **server address** and the **certificate fingerprint** built in. Both must stay the
+same for the life of the installation:
 
-- The address is `https://<name or IP>:<TASKFLOW_PORT>` - the name the PCs resolve, not the container's name.
-  If you change `TASKFLOW_PORT`, the address changes and a new installer is needed.
-- The fingerprint is the SHA-256 of `cert.pem`. A new certificate means a new fingerprint: rebuild and publish the
-  installer (or users confirm the new fingerprint once at sign-in). **Back up `TASKFLOW_TLS_DIR` together with the data**,
+- The address is `https://task.inverted.in:8443` = `https://TASKFLOW_HOST:TASKFLOW_PORT`. If you change
+  `TASKFLOW_PORT`, the address changes and a new installer is needed. The container side is always 8443.
+- The fingerprint is the SHA-256 of `cert.pem` (section 3). **Back up `TASKFLOW_TLS_DIR` together with the data**,
   so a rebuilt server keeps the same certificate.
-- Never disable pinning or switch to plain HTTP to "make it work"; check the fingerprint instead.
 
 ### Firewall
 
-Docker publishes ports through its own iptables rules, which **bypass `ufw`** rules for that port. Therefore:
+`task.inverted.in` resolves to a public address, so restrict access before the first start:
 
-1. Set `TASKFLOW_BIND_IP` to the host's office-network address (not `0.0.0.0`) if the host has other interfaces.
-2. Restrict who may connect in the `DOCKER-USER` chain (or on the network firewall), for example only the office/VPN range
-   `10.0.0.0/8` (adapt and test; make it persistent with your distribution's iptables tooling):
+1. **Cloud firewall / security group** (first line of defence): allow TCP 8443 only from the office public IP(s) and the
+   VPN range, and SSH (22) only from the admin addresses. Nothing else inbound.
+2. Docker publishes ports through its own iptables rules, which **bypass `ufw`** for that port. To filter on the host as
+   well, use the `DOCKER-USER` chain, e.g. allow only `203.0.113.0/24` (replace with your office/VPN range; test it, and
+   make it persistent with your distribution's iptables tooling):
    ```bash
-   sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL ! -s 10.0.0.0/8 -j DROP
+   sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 --ctdir ORIGINAL ! -s 203.0.113.0/24 -j DROP
    ```
-3. Do not expose the port to the internet. Only SSH and the TaskFlow port need to be reachable.
+3. `TASKFLOW_BIND_IP` can limit the published port to one interface of the host (on a cloud VM usually the private
+   interface address that the public IP is mapped to; `0.0.0.0` = all).
+4. Do not open 8443 to the whole internet unless that is a deliberate decision - the server has rate limits and lockouts,
+   but every sign-in page on the internet attracts password guessing.
 
-## 4. Day-to-day operations
+## 5. Day-to-day operations
 
 `taskflowctl` (Linux systemd install) does not apply here; these are the equivalents:
 
@@ -158,7 +236,7 @@ runs on the next start that day. **Copy the backups to another machine**, e.g. `
 `0 3 * * * root rsync -a /srv/taskflow/data/backups/ /mnt/nas/taskflow-backups/` - and keep a copy of `/srv/taskflow/tls`
 and `/srv/taskflow/config` with it.
 
-## 5. Upgrading
+## 6. Upgrading
 
 ```bash
 docker compose exec taskflow-server entrypoint.sh --backup-now       # 1. backup with the running version
@@ -171,9 +249,9 @@ docker compose ps && docker compose logs --tail 50
 ```
 
 Rollback: set `TASKFLOW_TAG` back to the old version and `docker compose up -d`. If the new version upgraded the database
-format, also restore the backup from step 1 (section 6). Update the server first, then publish the desktop update.
+format, also restore the backup from step 1 (section 7). Update the server first, then publish the desktop update.
 
-## 6. Restoring a backup
+## 7. Restoring a backup
 
 ```bash
 cd InvertedTaskFlow_Server_v1.0.1
@@ -189,18 +267,24 @@ docker compose up -d && docker compose ps
 
 If the check fails, put the kept files back (`mv $K $D/taskflow.db`, and its `-wal`/`-shm`) and choose another backup.
 
-## 7. Moving an existing systemd installation into Docker
+## 8. Moving an existing systemd installation into Docker
 
 1. `sudo taskflowctl backup`, then `sudo systemctl stop taskflow && sudo systemctl disable taskflow` - **only one server
    may ever write the database**.
 2. Copy the data with the service stopped: `sudo cp -p /var/lib/taskflow/taskflow.db* /srv/taskflow/data/` and
    `sudo cp -rp /var/lib/taskflow/backups /srv/taskflow/data/`, then `sudo chown -R 10001:10001 /srv/taskflow/data`.
-3. Copy `/etc/taskflow/cert.pem` and `key.pem` to `/srv/taskflow/tls/` (owner `root:10001`, key `0640`) - the fingerprint
-   stays the same, so no new desktop installer is needed.
+3. Certificate - check which name the installed apps use and what the old certificate covers:
+   `openssl x509 -in /etc/taskflow/cert.pem -noout -ext subjectAltName`
+   - **Apps already use `https://task.inverted.in:8443` and the certificate covers it:** copy `/etc/taskflow/cert.pem` and
+     `key.pem` to `/srv/taskflow/tls/` (owner `root:10001`, key `0640`) - same fingerprint, no new installer.
+   - **Apps use an older address (IP or other name):** moving to `task.inverted.in` changes the address built into the
+     apps anyway, so a new installer is needed. Create a new certificate for `task.inverted.in` (section 4, step 2) and
+     follow *If the certificate (fingerprint) changes* in section 3. (Keeping the old certificate with
+     `TASKFLOW_HOST=<old name>` only works while the apps keep using the old address.)
 4. Carry your settings over into `/srv/taskflow/config/server.ini` (keep the container paths of `deploy/docker/server.ini`).
-5. Keep the same `TASKFLOW_PORT` and host name as before, then `docker compose up -d`.
+5. Keep the same `TASKFLOW_PORT` as before (8443), then `docker compose up -d`.
 
-## 8. Kubernetes (not implemented - what it would take)
+## 9. Kubernetes (not implemented - what it would take)
 
 - **Exactly one replica**: a `StatefulSet` (or `Deployment` with `replicas: 1` and `strategy: Recreate`) - never two pods on
   the same database, no horizontal autoscaling. Updates mean a short outage.
@@ -220,7 +304,7 @@ If the check fails, put the kept files back (`mv $K $D/taskflow.db`, and its `-w
 - **Backups**: the in-server daily backup writes to the same volume - add volume snapshots or a CronJob that copies the
   `backups/` folder off the cluster.
 
-## 9. Limitations and things to know
+## 10. Limitations and things to know
 
 - **Client IP addresses.** The server rate-limits per computer (30 requests/s, 20 failed sign-ins per 10 minutes,
   5 sign-ups per hour). With Docker Engine's default port publishing (iptables) it sees the real client address. If the

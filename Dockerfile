@@ -36,9 +36,10 @@ FROM debian:${DEBIAN_RELEASE}-slim AS runtime
 ARG TASKFLOW_UID=10001
 ARG TASKFLOW_GID=10001
 # libssl3: the server links OpenSSL dynamically; ca-certificates: SMTP certificate checks;
-# tzdata: reminders and the daily backup use local time (TZ); curl: health check
+# tzdata: reminders and the daily backup use local time (TZ); curl: health check;
+# openssl (command line): entrypoint.sh checks the certificate against TASKFLOW_HOST and prints its fingerprint
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libssl3 ca-certificates tzdata curl \
+ && apt-get install -y --no-install-recommends libssl3 ca-certificates tzdata curl openssl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid "${TASKFLOW_GID}" taskflow \
  && useradd --system --uid "${TASKFLOW_UID}" --gid taskflow --home-dir /var/lib/taskflow --no-create-home \

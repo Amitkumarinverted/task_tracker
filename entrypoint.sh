@@ -121,7 +121,25 @@ if [ -n "$CERT" ] || [ -n "$KEY" ]; then
   case "$(stat -c %a "$KEY" 2>/dev/null || echo 640)" in
     *[1-7]) log "warning: the TLS private key is readable by everyone on the host - chmod 0640 it" ;;
   esac
+  openssl x509 -in "$CERT" -noout >/dev/null 2>&1 || die "TLS certificate $CERT is not a readable PEM certificate"
+  # the name the desktop apps use (TASKFLOW_HOST) must be in the certificate
+  if [ -n "${TASKFLOW_HOST:-}" ]; then
+    case "$TASKFLOW_HOST" in
+      *[!0-9.]*) check="-checkhost" ;;
+      *) check="-checkip" ;;
+    esac
+    if ! openssl x509 -in "$CERT" -noout "$check" "$TASKFLOW_HOST" 2>/dev/null | grep -q "does match"; then
+      die "the TLS certificate does not cover TASKFLOW_HOST=$TASKFLOW_HOST - create it with subjectAltName DNS:$TASKFLOW_HOST (see DOCKER.md), or correct TASKFLOW_HOST"
+    fi
+  else
+    log "warning: TASKFLOW_HOST is not set - the certificate is not checked against the server name"
+  fi
+  openssl x509 -in "$CERT" -noout -checkend 2592000 >/dev/null 2>&1 ||
+    log "warning: the TLS certificate expires within 30 days (or has expired): $(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null)"
+  FP="$(openssl x509 -in "$CERT" -outform DER 2>/dev/null | openssl dgst -sha256 -r | cut -c1-64 | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')"
   log "TLS: on (certificate $CERT)"
+  [ -z "${TASKFLOW_HOST:-}" ] || log "desktop app server address : https://$TASKFLOW_HOST:${TASKFLOW_PUBLIC_PORT:-$CONTAINER_PORT}"
+  log "certificate fingerprint     : $FP"
 elif [ "${TASKFLOW_ALLOW_HTTP:-0}" = "1" ]; then
   log "warning: TLS is OFF - passwords and session tokens are sent unencrypted (TASKFLOW_ALLOW_HTTP=1)"
 else

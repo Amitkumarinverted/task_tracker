@@ -22,6 +22,10 @@ services:
     user: "${TASKFLOW_UID:-10001}:${TASKFLOW_GID:-10001}"
     environment:
       TZ: ${TASKFLOW_TZ:-Asia/Kolkata}
+      # the name and port the desktop apps use - only checked against the certificate and printed at start-up;
+      # the server itself listens on 0.0.0.0:8443 inside the container (server.ini)
+      TASKFLOW_HOST: ${TASKFLOW_HOST:-task.inverted.in}
+      TASKFLOW_PUBLIC_PORT: ${TASKFLOW_PORT:-8443}
       TASKFLOW_ALLOW_HTTP: ${TASKFLOW_ALLOW_HTTP:-0}
       TASKFLOW_ALLOW_NEW_DB: ${TASKFLOW_ALLOW_NEW_DB:-0}
     ports:

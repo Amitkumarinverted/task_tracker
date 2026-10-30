@@ -3,7 +3,7 @@
 #  Inverted TaskFlow Server - one-step installation on Ubuntu 22.04 / 24.04 LTS or Debian 12
 #
 #    sudo bash install_server.sh                    (asks a few questions)
-#    sudo bash install_server.sh --host taskflow.inverted.local --admin it@inverted.in --yes
+#    sudo bash install_server.sh --host task.inverted.in --admin it@inverted.in --yes
 #
 #  What it does (safe to run again - it never deletes data):
 #    1. installs the build tools (gcc, cmake, OpenSSL headers)
@@ -52,7 +52,8 @@ command -v systemctl >/dev/null || die "systemd is required"
 case "${ID:-}" in ubuntu|debian) ;; *) warn "Tested on Ubuntu/Debian; continuing on ${PRETTY_NAME:-unknown}" ;; esac
 
 DEFAULT_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-DEFAULT_HOST="$DEFAULT_IP"
+# production server name (its DNS record must point to this server); the server's IP is added to the certificate too
+DEFAULT_HOST="task.inverted.in"
 # running again: the existing certificate knows the name the PCs already use
 if [ -f /etc/taskflow/cert.pem ]; then
   CN="$(openssl x509 -in /etc/taskflow/cert.pem -noout -subject -nameopt multiline 2>/dev/null | awk -F' = ' '/commonName/ {print $2}' || true)"

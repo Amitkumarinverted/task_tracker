@@ -1,10 +1,13 @@
 # Optional HTTPS for the Windows server with Caddy (https://caddyserver.com - one exe, free).
 # 1. In C:\InvertedTaskFlow\server.ini set:  bind = 127.0.0.1   and  port = 8080
+#    (the unencrypted backend then only answers on this machine - never publish port 8080)
 # 2. Put caddy.exe and this file (renamed to Caddyfile) in C:\Caddy, run:  caddy run
 #    (install it as a service with:  sc create caddy binPath= "C:\Caddy\caddy.exe run --config C:\Caddy\Caddyfile")
-# 3. Desktop apps use https://SERVERNAME:8443 - on first connection they show the certificate
-#    fingerprint; compare it with the one Caddy shows in its log, or build the installer with it.
-SERVERNAME:8443 {
+# 3. Desktop apps use https://task.inverted.in:8443 (production name; DNS must point to this server).
+#    On first connection they show the certificate fingerprint; compare it with the one Caddy shows in its log,
+#    or build the installer with it. "tls internal" keeps one long-lived certificate - do not switch to a
+#    public certificate that renews every few months: each renewal changes the pinned fingerprint.
+task.inverted.in:8443 {
 	tls internal
 	reverse_proxy 127.0.0.1:8080 {
 		flush_interval -1
