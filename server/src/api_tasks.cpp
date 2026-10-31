@@ -322,7 +322,9 @@ json Api::task_action(const json& t, const std::string& act, const json& b, cons
     app.add_event(id, u.id, "Started");
   } else if (act == "hold" || act == "resume") {
     bool hold = act == "hold";
-    require(st == (hold ? "IN_PROGRESS" : "ON_HOLD"), 400, hold ? "Only tasks in progress can be put on hold" : "This task is not on hold");
+    // work can be held before it starts too (waiting for parts, a decision...); resuming means working on it
+    require(hold ? (st == "IN_PROGRESS" || st == "TODO") : st == "ON_HOLD", 400,
+            hold ? "Only work that is to do or in progress can be put on hold" : "This task is not on hold");
     require(assignee || manager, 403, "Only the assignee or their manager can do that");
     std::string c = hold ? req_text(b, "comment", "Reason", 1000) : opt_text(b, "comment", 1000, "Comment");
     app.db.exec("UPDATE tasks SET status=? WHERE id=?", {hold ? "ON_HOLD" : "IN_PROGRESS", id});

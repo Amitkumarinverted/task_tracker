@@ -765,6 +765,19 @@ try:
           s == 200 and find(d["projects"], id=secr)[0]["owner_id"] == rahul_u["id"] and task_by_title(rahul, "Floor measurements") is not None,
           (s, r))
 
+    print("== v1.2: status changes")
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Waiting for parts", "due_date": "2030-07-10",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2}, rahul)
+    wp = r["id"]
+    rs = sync(rahul)
+    s, r = call("POST", f"/tasks/{wp}/hold", {"comment": "Fixture parts not delivered yet"}, manoj)
+    t = task_by_title(rahul, "Waiting for parts")
+    check("a task that has not started can be put on hold, with a reason", s == 200 and t["status"] == "ON_HOLD", (s, r))
+    check("... and the manager is told", [x for x in notifs(rahul, rs["cursor"]) if x["type"] == "STATUS_CHANGED" and x["task_id"] == wp])
+    check("a hold needs a reason", call("POST", f"/tasks/{wp}/resume", {}, manoj)[0] == 200 and
+          call("POST", f"/tasks/{wp}/hold", {}, manoj)[0] == 400)
+    check("a colleague cannot change someone else's status", call("POST", f"/tasks/{wp}/hold", {"comment": "x"}, sneha)[0] in (403, 404))
+
     print("== v1.1: dependencies and helpers - edge cases")
     s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "RV main", "due_date": "2030-07-31", "assignee_id": manoj_u["id"],
                                    "dept_id": L2}, rahul)

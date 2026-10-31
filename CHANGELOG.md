@@ -4,6 +4,42 @@ Each release is published with `release_to_git.bat`. Add a section for the new v
 (same number as `TF_VERSION` in `common/version.h`) before releasing - its text becomes the
 release notes that users see in the update window.
 
+## [1.2.0] - 2026-10-31
+
+Easier to read, status in one click, project health that explains itself.
+
+- **Larger, clearer text.** Text was sized smaller than intended on Windows (Segoe UI came out at about 12 px);
+  it is now 14 px for normal text and larger for titles and key figures, a little darker for secondary text, with
+  plain section headings in the task panel. **Settings > Text size** offers Smaller, Standard, Larger and Largest;
+  Ctrl + and Ctrl - change it too (Ctrl 0 goes back to standard). The app also redraws sharply when moved to a screen
+  with other scaling.
+- **Change the status in one click.** The status chip in My tasks, My team, the projects and the task panel opens
+  the next steps for that task: In progress, On hold (with the reason), Mark complete - or, for the reviewer, approve
+  or send back. Everyone who sees the task sees the change at once. People who may not change a task's status see
+  who can. Work can now also be put on hold before it starts (waiting for parts, a decision...).
+- **Why a project is On track, At risk or Late.** The reason is written under the progress bar, shown when hovering
+  the badge and included in the Word status report ("SP3WBMS-2 is 2 days overdue"). The rules: Late when the target
+  date has passed with open work, when open work is planned beyond the target, or a main task is more than 3 days
+  overdue; At risk when a main task is up to 3 days overdue, a sub-task is overdue, or much more of the planned time
+  has passed than work is done. (Before, a project whose last task was due within 3 days of the target was "At risk"
+  although nothing was late - that rule is gone.)
+- People in project lists show with their face and first name; board cards no longer let tags run into the task key.
+- Server: work that is "To do" can be put on hold.
+
+## [1.1.1] - 2026-10-31
+
+Release tools: updates of the desktop app can be installed again.
+
+- **Checksums in the release notes.** `release_to_git.bat` handed the three file names to the notes script in a form
+  PowerShell reads as one name, so the notes of v1.1.0 (and earlier) had no checksums and the apps refused to install
+  the update ("The release has no checksum"). Fixed; the script now also stops before publishing when the
+  installer's checksum is missing, and reads the published release back to confirm it.
+- **Repairing a published release.** New `fix_release_checksums.bat`: downloads the files of the latest (or a named)
+  release, checks them against the copies built on this PC, and adds their checksums to the release notes - nothing
+  is rebuilt or uploaded again.
+- The app's message for such a release now says what to do.
+- No changes to the server program beyond the version number.
+
 ## [1.1.0] - 2026-10-31
 
 Teamwork release: boards and timelines everywhere, project members, more people on one task, dependencies.
