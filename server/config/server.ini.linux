@@ -7,9 +7,7 @@
 # ---- network
 bind = 0.0.0.0
 port = 8443
-# HTTPS certificate (created by install_server.sh; replace with your own if you have one).
-# It must cover the name the desktop apps use (production: task.inverted.in). A new certificate has a new
-# fingerprint: the desktop installer must then be rebuilt (IT Admin Guide, chapter 5).
+# HTTPS certificate (created by install_server.sh; replace with your own if you have one)
 tls_cert = /etc/taskflow/cert.pem
 tls_key = /etc/taskflow/key.pem
 # desktop apps connected at the same time (each keeps one instant-update connection open)
@@ -51,3 +49,6 @@ smtp_password =
 smtp_from = taskflow@inverted.in
 smtp_from_name = Inverted TaskFlow
 smtp_verify_cert = 1
+# morning e-mail to each person who has something to act on (overdue, due today, decisions waiting);
+# Monday to Saturday at this time, "off" to switch it off. Test with:  taskflowctl digest
+digest_time = 08:30

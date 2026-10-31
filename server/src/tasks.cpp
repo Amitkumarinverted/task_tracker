@@ -27,11 +27,16 @@ int64_t App::create_task(const json& f) {
   int64_t id = db.insert(
       "INSERT INTO tasks(key,project_id,parent_id,title,description,dept_id,assignee_id,created_by,origin,"
       "requesting_dept_id,requested_by,request_id,priority,status,start_date,due_date,original_due,progress,"
-      "created_at,updated_at,row_version,seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,1,?)",
+      "is_milestone,recur,recur_day,created_at,updated_at,row_version,seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,1,?)",
       {next_task_key(jint(f, "project_id")), jint(f, "project_id"), opt("parent_id"), jstr(f, "title"),
        jstr(f, "description"), jint(f, "dept_id"), opt("assignee_id"), jint(f, "created_by"), jstr(f, "origin", "MANAGER"),
        opt("requesting_dept_id"), opt("requested_by"), opt("request_id"), jstr(f, "priority", "MEDIUM"), status,
-       jstr(f, "start_date"), due, status == "PROPOSED" ? std::string() : due, now, now, next_seq()});
+       jstr(f, "start_date"), due, status == "PROPOSED" ? std::string() : due, jint(f, "is_milestone") ? 1 : 0,
+       jstr(f, "recur"),
+       jstr(f, "recur") != "MONTHLY" ? 0 : jint(f, "recur_day") ? jint(f, "recur_day") : (due.size() == 10 ? std::stoll(due.substr(8, 2)) : 0),
+       now, now, next_seq()});
+  // whoever is given work in a project joins it (and so sees the rest of the project's work)
+  if (status != "PROPOSED" && jint(f, "assignee_id")) ensure_project_member(jint(f, "project_id"), jint(f, "assignee_id"), jint(f, "created_by"));
   if (jint(f, "parent_id")) {
     // the new assignee may now see the sibling sub-tasks: re-send them with this change
     db.exec("UPDATE tasks SET seq=? WHERE parent_id=? AND id<>?", {next_seq(), jint(f, "parent_id"), id});

@@ -33,3 +33,5 @@ smtp_user =
 smtp_password =
 smtp_from = taskflow@inverted.in
 smtp_from_name = Inverted TaskFlow
+# morning e-mail to each person who has something to act on; Monday-Saturday at this time, "off" = none
+digest_time = 08:30

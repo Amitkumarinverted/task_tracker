@@ -4,6 +4,8 @@
 #include <chrono>
 #include <filesystem>
 #include <algorithm>
+#include <map>
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -50,6 +52,81 @@ void App::run_reminders() {
   db.exec("DELETE FROM reminders_sent WHERE day < ?", {add_days(today, -60)});
   tx.commit();
   if (any) changed();
+}
+
+// ============================================================== morning digest
+// One e-mail per person who has something to act on today: their overdue work, what is due today and tomorrow,
+// and - for managers - the decisions waiting for them and their team's overdue work. Nobody else is e-mailed.
+int App::run_digest() {
+  std::lock_guard<std::recursive_mutex> lock(mu);
+  const std::string today = today_local(), tomorrow = add_days(today, 1);
+  std::map<int64_t, std::vector<std::string>> overdue, due_today, due_tomorrow;
+  std::map<int64_t, int> decisions, team_overdue;
+  for (auto& t : db.query("SELECT id,key,title,assignee_id,dept_id,due_date FROM tasks WHERE status IN ('TODO','IN_PROGRESS','ON_HOLD') "
+                          "AND due_date<>'' AND due_date<=?", {tomorrow})) {
+    int64_t a = jint(t, "assignee_id");
+    std::string line = jstr(t, "key") + "  " + jstr(t, "title");
+    std::string due = jstr(t, "due_date");
+    if (due < today) {
+      overdue[a].push_back(line + "  (due " + hdate(due) + ")");
+      for (auto m : authority_over(a, jint(t, "dept_id"))) team_overdue[m]++;
+    } else if (due == today) due_today[a].push_back(line);
+    else due_tomorrow[a].push_back(line);
+  }
+  for (auto& t : db.query("SELECT * FROM tasks WHERE status='IN_REVIEW'"))
+    for (auto r : reviewers_for(t)) decisions[r]++;
+  for (auto& e : db.query("SELECT t.assignee_id, t.dept_id FROM extensions e JOIN tasks t ON t.id=e.task_id WHERE e.status='PENDING'"))
+    for (auto m : managers_of(jint(e, "assignee_id"), jint(e, "dept_id"))) decisions[m]++;
+  for (auto& q : db.query("SELECT type, requested_by, target_dept_id FROM work_requests WHERE status='PENDING'")) {
+    std::set<int64_t> who;
+    if (jstr(q, "type") == "CROSS_TEAM") {
+      who = leaders(jint(q, "target_dept_id"));
+      if (who.empty())
+        for (auto a : ancestors(jint(q, "target_dept_id"))) {
+          who = leaders(a);
+          if (!who.empty()) break;
+        }
+    } else {
+      who = managers_of(jint(q, "requested_by"), jint(q, "target_dept_id"));
+    }
+    for (auto w : who) decisions[w]++;
+  }
+  std::set<int64_t> people;
+  for (auto* m : {&overdue, &due_today, &due_tomorrow})
+    for (auto& kv : *m) people.insert(kv.first);
+  for (auto* m : {&decisions, &team_overdue})
+    for (auto& kv : *m) people.insert(kv.first);
+  int queued = 0;
+  Tx tx(db);
+  for (auto uid : people) {
+    json u = db.one("SELECT email, name, status FROM users WHERE id=?", {uid});
+    if (u.is_null() || jstr(u, "status") != "ACTIVE" || jstr(u, "email").empty()) continue;
+    auto list = [&](const char* title, const std::vector<std::string>& v) {
+      if (v.empty()) return std::string();
+      std::string s = std::string(title) + "\r\n";
+      for (size_t i = 0; i < v.size() && i < 10; i++) s += "  - " + v[i] + "\r\n";
+      if (v.size() > 10) s += "  ... and " + std::to_string(v.size() - 10) + " more\r\n";
+      return s + "\r\n";
+    };
+    std::vector<std::string> head;
+    if (!overdue[uid].empty()) head.push_back(std::to_string(overdue[uid].size()) + " overdue");
+    if (!due_today[uid].empty()) head.push_back(std::to_string(due_today[uid].size()) + " due today");
+    if (decisions[uid]) head.push_back(std::to_string(decisions[uid]) + " waiting for your decision");
+    if (team_overdue[uid]) head.push_back(std::to_string(team_overdue[uid]) + " overdue in your team");
+    if (!due_tomorrow[uid].empty()) head.push_back(std::to_string(due_tomorrow[uid].size()) + " due tomorrow");
+    std::string subject = "[TaskFlow] Your day: ";
+    for (size_t i = 0; i < head.size(); i++) subject += (i ? ", " : "") + head[i];
+    std::string body = "Good morning " + jstr(u, "name") + ",\r\n\r\n" + list("Overdue - please finish or ask for more time:", overdue[uid]) +
+                       list("Due today:", due_today[uid]) + list("Due tomorrow:", due_tomorrow[uid]);
+    if (decisions[uid])
+      body += std::to_string(decisions[uid]) + " item(s) wait for your decision - open Approvals in TaskFlow.\r\n\r\n";
+    if (team_overdue[uid]) body += std::to_string(team_overdue[uid]) + " task(s) of people you manage are overdue - see My team.\r\n\r\n";
+    body += "-- Inverted TaskFlow (morning summary; sent only when something needs you)";
+    db.insert("INSERT INTO email_outbox(to_email,subject,body,created_at) VALUES(?,?,?,?)", {u["email"], subject, body, now_iso()});
+    queued++;
+  }
+  tx.commit();
+  return queued;
 }
 
 // ============================================================== backups

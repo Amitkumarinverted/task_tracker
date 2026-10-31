@@ -32,6 +32,7 @@ json Api::create_request(const json& b, const UserCtx& u) {
     }
     json p = project_row(jint(b, "project_id"));
     check_project_open(p);
+    require(app.can_use_project(u, p), 403, "You are not part of project " + jstr(p, "name") + " - ask its owner to add you");
     std::string title = req_text(b, "title", "Title");
     std::string start = opt_date(b, "start_date", "Start date");
     std::string due = req_date(b, "due_date", "Due date");
@@ -59,23 +60,42 @@ json Api::create_request(const json& b, const UserCtx& u) {
     require(jint(task, "assignee_id") == u.id, 403, "You can ask for help on your own tasks");
     require(kOpen.count(jstr(task, "status")) > 0, 400, "Help can only be requested on open tasks");
     int64_t unit = jint(task, "dept_id");
-    auto mgrs = app.managers_of(u.id, unit);
-    require(!mgrs.empty(), 400, "Nobody above you approves help requests - add a sub-task for your team directly");
+    int64_t target = unit;  // who decides: the manager of the team - or of the department when the colleague is in another of its teams
     int64_t sugg = jint(b, "suggested_assignee_id");
     if (sugg) {
       require(sugg != u.id, 400, "Suggest a colleague other than yourself");
       require(is_active_user(sugg), 400, "The suggested colleague is not an active user");
+      int64_t top = top_unit(unit);
+      auto dept = app.subtree(top), team = app.subtree(unit);
+      int64_t hunit = 0;
+      for (auto x : units_of(sugg))
+        if (team.count(x)) { hunit = x; break; }
+      if (!hunit)
+        for (auto x : units_of(sugg))
+          if (dept.count(x)) { hunit = x; break; }
+      require(hunit != 0, 400, app.name_of(sugg) + " is not in " + app.unit_label(top) +
+                                   " - for other departments use 'Request work from another team'");
+      if (!team.count(hunit)) target = top;  // another sub-department of the same department
     }
+    auto mgrs = app.managers_of(u.id, target);
+    require(!mgrs.empty(), 400, "Nobody above you approves help requests - add a sub-task for your team directly");
     std::string title = req_text(b, "title", "What help is needed");
     std::string needed = opt_date(b, "needed_by", "Needed-by date");
     Tx tx(app.db);
     int64_t rid = app.db.insert(
         "INSERT INTO work_requests(type,status,project_id,title,description,requested_by,requesting_dept_id,target_dept_id,"
         "parent_task_id,suggested_assignee_id,needed_by,priority,created_at,seq) VALUES('TEAM_HELP','PENDING',?,?,?,?,?,?,?,?,?,?,?,?)",
-        {task["project_id"], title, opt_text(b, "description", 5000, "Description"), u.id, unit, unit, task["id"],
+        {task["project_id"], title, opt_text(b, "description", 5000, "Description"), u.id, unit, target, task["id"],
          sugg ? json(sugg) : json(), needed, priority_of(b, jstr(task, "priority")), now, app.next_seq()});
     app.add_event(jint(task, "id"), u.id, "Asked for help: " + title + (sugg ? " (suggested " + app.name_of(sugg) + ")" : ""));
     app.notify_all(mgrs, u.id, "HELP_REQUEST", "Help requested by " + u.name + " on " + jstr(task, "key"), title, jint(task, "id"), rid, true);
+    if (target != unit) {  // the department decides; the asking team's own managers are kept informed
+      std::set<int64_t> fyi;
+      for (auto m : app.managers_of(u.id, unit))
+        if (!mgrs.count(m)) fyi.insert(m);
+      app.notify_all(fyi, u.id, "HELP_ASKED", u.name + " asked " + (sugg ? app.name_of(sugg) : std::string("a colleague")) + " for help",
+                     jstr(task, "key") + "  " + title + " - " + app.unit_label(top_unit(unit)) + " decides", jint(task, "id"));
+    }
     app.touch_task(jint(task, "id"));
     app.audit(u.id, "request_help", "request", rid, title);
     tx.commit();
@@ -91,6 +111,7 @@ json Api::create_request(const json& b, const UserCtx& u) {
     require(target != from, 400, "For work inside your own team, ask your manager or use 'Ask a colleague'");
     json p = project_row(jint(b, "project_id"));
     check_project_open(p);
+    require(app.can_use_project(u, p), 403, "You are not part of project " + jstr(p, "name") + " - choose a project of your own");
     std::string title = req_text(b, "title", "Title");
     std::string needed = req_date(b, "needed_by", "Needed-by date");
     json q = {{"type", "CROSS_TEAM"}, {"target_dept_id", target}};
@@ -128,9 +149,10 @@ json Api::approve_request(const json& q, const json& b, const UserCtx& u) {
     std::string due = jhas(b, "due_date") ? req_date(b, "due_date", "Due date") : jstr(t, "due_date");
     require(start.empty() || start <= due, 400, "Start date must be on or before the due date");
     int64_t project = jint(t, "project_id");
-    if (jhas(b, "project_id")) {
+    if (jhas(b, "project_id") && jint(b, "project_id") != project) {
       json p = project_row(jint(b, "project_id"));
       check_project_open(p);
+      require(app.can_use_project(u, p), 403, "You are not part of project " + jstr(p, "name") + " - ask its owner to add you");
       project = jint(p, "id");
     }
     check_project_open(project_row(project));
@@ -147,6 +169,7 @@ json Api::approve_request(const json& q, const json& b, const UserCtx& u) {
                 "assignee_id=?,dept_id=?,status='TODO' WHERE id=?",
                 {title, desc, pri, start, due, due, project, assignee, unit, tid});
     app.add_event(tid, u.id, "Proposal approved by " + u.name + (note.empty() ? "" : ": " + note));
+    app.ensure_project_member(project, assignee, u.id);
     app.touch_task(tid);
     app.record_revocations(viewers_before, app.task_viewers(related, candidates));  // e.g. given to another team
     app.notify(jint(q, "requested_by"), "PROPOSAL_APPROVED", "Your proposal was approved: " + jstr(t, "key"), title, tid, rid, true);
@@ -187,6 +210,8 @@ json Api::approve_request(const json& q, const json& b, const UserCtx& u) {
       f["origin"] = "HELP";
       f["parent_id"] = top;
       f["project_id"] = topt["project_id"];
+      if (jint(q, "requesting_dept_id") && jint(q, "requesting_dept_id") != unit)
+        f["requesting_dept_id"] = q["requesting_dept_id"];  // help from another team: the asking team's heads keep sight of it
       if (!jstr(topt, "due_date").empty() && due > jstr(topt, "due_date")) f["due_date"] = topt["due_date"];
     } else {
       f["origin"] = "CROSS_TEAM";
@@ -199,6 +224,17 @@ json Api::approve_request(const json& q, const json& b, const UserCtx& u) {
     if (type == "TEAM_HELP") {
       app.add_event(jint(t, "parent_id"), u.id, "Help approved: " + app.name_of(assignee) + " assigned (" + jstr(t, "key") + ")");
       app.touch_task(jint(t, "parent_id"));
+      if (jint(q, "requesting_dept_id") && jint(q, "requesting_dept_id") != unit) {  // the helper's own head learns where their person helps
+        app.notify_all(app.leaders(unit), u.id, "HELP_GIVEN", app.name_of(assignee) + " helps " + app.unit_label(jint(q, "requesting_dept_id")),
+                       jstr(t, "key") + "  " + jstr(t, "title"), tid);
+        // ... and so do the asking team's managers, when the department decided
+        if (jint(q, "target_dept_id") != jint(q, "requesting_dept_id")) {
+          std::set<int64_t> fyi = app.managers_of(jint(q, "requested_by"), jint(q, "requesting_dept_id"));
+          for (auto l : app.leaders(unit)) fyi.erase(l);
+          app.notify_all(fyi, u.id, "HELP_GIVEN", app.name_of(assignee) + " will help " + app.name_of(jint(q, "requested_by")),
+                         jstr(t, "key") + "  " + jstr(t, "title"), tid);
+        }
+      }
     }
     app.notify(jint(q, "requested_by"), "REQUEST_APPROVED", "Request approved - " + app.name_of(assignee) + " will do it", jstr(q, "title"), tid, rid, true);
     if (assignee != u.id) app.notify(assignee, "TASK_ASSIGNED", "New task for you: " + jstr(t, "key"), jstr(t, "title"), tid, 0, true);
@@ -223,6 +259,7 @@ json Api::reject_request(const json& q, const json& b, const UserCtx& u) {
     app.db.exec("UPDATE tasks SET status='REJECTED' WHERE id=?", {q["resulting_task_id"]});
     app.add_event(jint(q, "resulting_task_id"), u.id, "Proposal not approved: " + note);
     app.touch_task(jint(q, "resulting_task_id"));
+    tell_waiting_tasks(app.get_task(jint(q, "resulting_task_id")), u);
   }
   if (jstr(q, "type") == "TEAM_HELP" && jint(q, "parent_task_id")) {
     app.add_event(jint(q, "parent_task_id"), u.id, "Help request not approved: " + note);

@@ -110,12 +110,20 @@ static bool load_ini(const std::string& path, Config& c, bool must_exist) {
     else if (k == "smtp_from") c.smtp_from = v;
     else if (k == "smtp_from_name") c.smtp_from_name = v;
     else if (k == "smtp_verify_cert") c.smtp_verify_cert = truthy(v);
+    else if (k == "digest_time") c.digest_time = v;
     else if (k == "demo_data") c.demo = truthy(v);
     else std::cerr << "  server.ini line " << n << ": unknown setting '" << k << "' ignored\n";
   }
   if (c.smtp_security != "starttls" && c.smtp_security != "ssl" && c.smtp_security != "none") {
     std::cerr << "  server.ini: smtp_security must be starttls, ssl or none - using starttls\n";
     c.smtp_security = "starttls";
+  }
+  if (c.digest_time != "off") {
+    int dh = 0, dm = 0;
+    if (sscanf(c.digest_time.c_str(), "%d:%d", &dh, &dm) != 2 || dh < 0 || dh > 23 || dm < 0 || dm > 59) {
+      std::cerr << "  server.ini: digest_time must look like 08:30 (or off) - using 08:30\n";
+      c.digest_time = "08:30";
+    }
   }
   int hh = 0, mm = 0;
   if (sscanf(c.backup_time.c_str(), "%d:%d", &hh, &mm) != 2 || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
@@ -259,6 +267,15 @@ static int run_server(Config cfg) {
   // ---- background jobs: reminders (10 min), daily backup, session clean-up, e-mail
   std::thread jobs([&] {
     int tick = 0;
+    std::string digest_until = "23:59";
+    {
+      int dh = 8, dm = 30;
+      if (sscanf(cfg.digest_time.c_str(), "%d:%d", &dh, &dm) == 2 && dh + 3 <= 23) {
+        char b[16];
+        snprintf(b, sizeof b, "%02d:%02d", (dh + 3) % 24, dm % 60);
+        digest_until = b;
+      }
+    }
     auto next_backup_try = std::chrono::steady_clock::now();
     while (g_running) {
       try {
@@ -280,6 +297,20 @@ static int run_server(Config cfg) {
               next_backup_try = std::chrono::steady_clock::now() + std::chrono::hours(1);
             }
           }
+        }
+        // the morning digest, once a day (not on Sundays), when e-mail is set up
+        // (only in the 3 hours after digest_time, so a server started late in the day does not send "good morning" at night)
+        if (tick % 60 == 25 && cfg.email_enabled && cfg.digest_time != "off" && local_hm() >= cfg.digest_time &&
+            local_hm() < digest_until) {
+          std::string today = today_local(), last;
+          {
+            std::lock_guard<std::recursive_mutex> lock(app->mu);
+            last = jstr(app->db.one("SELECT value FROM meta WHERE key='last_digest_day'"), "value");
+            if (last != today)
+              app->db.exec("INSERT INTO meta(key,value) VALUES('last_digest_day',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", {today});
+          }
+          std::tm l = local_tm(std::time(nullptr));
+          if (last != today && l.tm_wday != 0) log_line("  Morning digest: " + std::to_string(app->run_digest()) + " e-mail(s) queued");
         }
         if (tick % 3600 == 120) {
           std::lock_guard<std::recursive_mutex> lock(app->mu);
@@ -347,6 +378,16 @@ static int cmd_backup(const Config& cfg) {
   return 0;  // run_backup already reported "Backup written: <file>"
 }
 
+static int cmd_digest(const Config& cfg) {
+  if (!cfg.email_enabled) {
+    std::cerr << "  E-mail is switched off (email_enabled = 0) - the digest is sent by e-mail only.\n";
+    return 1;
+  }
+  auto app = open_app(cfg);
+  std::cout << "  Morning digest: " << app->run_digest() << " e-mail(s) queued - the running server sends them within a minute.\n";
+  return 0;
+}
+
 static int cmd_check(const Config& cfg) {
   auto app = open_app(cfg);
   std::lock_guard<std::recursive_mutex> lock(app->mu);
@@ -410,6 +451,7 @@ static void usage() {
             << "  --check                 verify the database\n"
             << "  --reset-password EMAIL  set a temporary password for an account and print it\n"
             << "  --test-email ADDRESS    send a test e-mail using the e-mail settings\n"
+            << "  --digest-now            queue today's morning digest e-mails now\n"
 #ifdef _WIN32
             << "  --install-service       install as a Windows service (run as Administrator)\n"
             << "  --uninstall-service     remove the Windows service\n"
@@ -452,7 +494,7 @@ int main(int argc, char** argv) {
     if (a == "--config") ini = next();
     else if (a == "--service") service = true;
     else if (a == "--port" || a == "--db" || a == "--reset-password" || a == "--test-email") next();
-    else if (a == "--demo" || a == "--reset" || a == "--backup-now" || a == "--check" || a == "--install-service" ||
+    else if (a == "--demo" || a == "--reset" || a == "--backup-now" || a == "--check" || a == "--digest-now" || a == "--install-service" ||
              a == "--uninstall-service") {
     } else if (a == "--version" || a == "-v") {
       std::cout << TF_VERSION << "\n";
@@ -487,7 +529,7 @@ int main(int argc, char** argv) {
     else if (a == "--demo") cfg.demo = true;
     else if (a == "--reset") cfg.reset = true;
     else if (a == "--config") i++;
-    else if (a == "--backup-now" || a == "--check" || a == "--install-service" || a == "--uninstall-service") action = a;
+    else if (a == "--backup-now" || a == "--check" || a == "--digest-now" || a == "--install-service" || a == "--uninstall-service") action = a;
     else if ((a == "--reset-password" || a == "--test-email") && i + 1 < argc) { action = a; action_arg = argv[++i]; }
   }
   try {
@@ -495,6 +537,7 @@ int main(int argc, char** argv) {
     auto done = [](int rc) { log_flush(); return rc; };
     if (action == "--backup-now") return done(cmd_backup(cfg));
     if (action == "--check") return done(cmd_check(cfg));
+    if (action == "--digest-now") return done(cmd_digest(cfg));
     if (action == "--reset-password") return done(cmd_reset_password(cfg, action_arg));
     if (action == "--test-email") return done(cmd_test_email(cfg, action_arg));
 #ifdef _WIN32

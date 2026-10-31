@@ -180,6 +180,18 @@ json Api::build_delta(const UserCtx& u, int64_t c, bool full) {
   json comments = attached("comments");
   json exts = attached("extensions");
   json compl_rows = attached("completions");
+  json helper_rows = attached("task_members");
+  json dep_rows = json::array();
+  for (auto r : attached("task_deps")) {  // the far end of a task this person cannot open is sent as 0 ("hidden")
+    if (!task_visible(jint(r, "depends_on"))) {
+      json d = app.db.one("SELECT status FROM tasks WHERE id=?", {r["depends_on"]});
+      std::string st = d.is_null() ? "CANCELLED" : jstr(d, "status");
+      r["depends_on"] = 0;
+      r["hidden"] = 1;
+      r["done"] = (st == "DONE" || st == "CANCELLED" || st == "REJECTED") ? 1 : 0;
+    }
+    dep_rows.push_back(std::move(r));
+  }
 
   json reqs = json::array(), revoked_reqs = json::array();  // request visibility never narrows (fixed parties)
   json req_rows = full ? app.db.query("SELECT * FROM work_requests WHERE status='PENDING' OR decided_at>=? OR created_at>=?",
@@ -193,37 +205,60 @@ json Api::build_delta(const UserCtx& u, int64_t c, bool full) {
   }
   json projects = json::array();
   std::set<int64_t> seen_p;
-  for (auto& p : app.db.query("SELECT * FROM projects WHERE seq>?", {c})) {
+  std::map<int64_t, bool> proj_cache;
+  auto project_visible = [&](const json& p) {
     int64_t pid = jint(p, "id");
-    if (u.sees_all() || u.member_of(jint(p, "dept_id")) || vis.managed.count(jint(p, "dept_id")) || project_refs.count(pid)) {
-      seen_p.insert(pid);
-      projects.push_back(std::move(p));
-      continue;
-    }
+    auto it = proj_cache.find(pid);
+    if (it != proj_cache.end()) return it->second;
+    bool ok = u.sees_all() || u.member_of(jint(p, "dept_id")) || vis.managed.count(jint(p, "dept_id")) || project_refs.count(pid) ||
+              vis.member_projects.count(pid);
     // projects of the parent department are useful to sub-department members
-    bool parent_dept = false;
-    for (auto& kv : u.units)
-      if (app.parent_of(kv.first) == jint(p, "dept_id")) parent_dept = true;
+    if (!ok)
+      for (auto& kv : u.units)
+        if (app.parent_of(kv.first) == jint(p, "dept_id")) ok = true;
     // a renamed / re-dated project must also reach people who see it only through one of its tasks
-    bool linked = false;
-    if (!parent_dept && !full) {
-      auto list = [](const std::set<int64_t>& s) {
-        std::string l;
-        for (auto id : s) l += (l.empty() ? "" : ",") + std::to_string(id);
-        return l;
-      };
+    if (!ok && !full) {
       std::string cond = "assignee_id=? OR created_by=? OR requested_by=?";
       if (!vis.managed.empty())
-        cond += " OR dept_id IN (" + list(vis.managed) + ") OR requesting_dept_id IN (" + list(vis.managed) + ")";
-      if (!vis.my_tasks.empty()) cond += " OR parent_id IN (" + list(vis.my_tasks) + ")";
+        cond += " OR dept_id IN (" + in_list(vis.managed) + ") OR requesting_dept_id IN (" + in_list(vis.managed) + ")";
+      if (!vis.my_tasks.empty()) cond += " OR id IN (" + in_list(vis.my_tasks) + ") OR parent_id IN (" + in_list(vis.my_tasks) + ")";
       if (!vis.parents_of_mine.empty())
-        cond += " OR parent_id IN (" + list(vis.parents_of_mine) + ") OR id IN (" + list(vis.parents_of_mine) + ")";
-      linked = !app.db.one("SELECT 1 AS x FROM tasks WHERE project_id=? AND (" + cond + ") LIMIT 1", {pid, u.id, u.id, u.id}).is_null();
+        cond += " OR parent_id IN (" + in_list(vis.parents_of_mine) + ") OR id IN (" + in_list(vis.parents_of_mine) + ")";
+      ok = !app.db.one("SELECT 1 AS x FROM tasks WHERE project_id=? AND (" + cond + ") LIMIT 1", {pid, u.id, u.id, u.id}).is_null();
     }
-    if (parent_dept || linked) {
-      seen_p.insert(pid);
-      projects.push_back(std::move(p));
+    proj_cache[pid] = ok;
+    return ok;
+  };
+  for (auto& p : app.db.query("SELECT * FROM projects WHERE seq>?", {c})) {
+    if (!project_visible(p)) continue;
+    seen_p.insert(jint(p, "id"));
+    projects.push_back(std::move(p));
+  }
+  // the people of a project: for its members, its owner and the people who manage it (not for everyone who sees
+  // the project's name)
+  json pm_rows = json::array();
+  std::map<int64_t, bool> pm_cache;
+  auto pm_entitled = [&](int64_t pid) {
+    auto it = pm_cache.find(pid);
+    if (it != pm_cache.end()) return it->second;
+    bool ok = vis.member_projects.count(pid) > 0;
+    if (!ok) ok = app.may_manage_project(u, app.db.one("SELECT * FROM projects WHERE id=?", {pid}));
+    pm_cache[pid] = ok;
+    return ok;
+  };
+  if (full) {
+    for (auto& r : app.db.query("SELECT * FROM project_members"))
+      if (pm_entitled(jint(r, "project_id"))) pm_rows.push_back(std::move(r));
+  } else {
+    std::set<int64_t> joined;  // projects this person just joined: all of their people
+    for (auto& r : app.db.query("SELECT * FROM project_members WHERE seq>?", {c})) {
+      if (!pm_entitled(jint(r, "project_id"))) continue;
+      if (jint(r, "user_id") == u.id && jint(r, "active")) joined.insert(jint(r, "project_id"));
+      pm_rows.push_back(std::move(r));
     }
+    if (!joined.empty())
+      for (auto& r : app.db.query("SELECT * FROM project_members WHERE seq<=? AND project_id IN (" + in_list(joined) + ")", {c}))
+        pm_rows.push_back(std::move(r));
   }
   std::set<int64_t> missing;
   for (auto pid : project_refs) if (!seen_p.count(pid)) missing.insert(pid);
@@ -236,6 +271,9 @@ json Api::build_delta(const UserCtx& u, int64_t c, bool full) {
   put("completions", std::move(compl_rows));
   put("requests", std::move(reqs));
   put("projects", std::move(projects));
+  put("project_members", std::move(pm_rows));
+  put("task_members", std::move(helper_rows));
+  put("task_deps", std::move(dep_rows));
   put("notifications", full ? app.db.query("SELECT * FROM (SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 300) ORDER BY id", {u.id})
                             : app.db.query("SELECT * FROM notifications WHERE user_id=? AND seq>?", {u.id, c}));
   if (!revoked_tasks.empty() || !revoked_reqs.empty()) any = true;

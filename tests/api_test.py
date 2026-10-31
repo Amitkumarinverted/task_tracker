@@ -55,7 +55,7 @@ def call(method, path, body=None, token=None, raw=None, timeout=40):
         except Exception:
             return e.code, {"raw": txt[:200]}
 
-#testing
+
 def check(name, cond, extra=""):
     global PASS, FAIL
     if cond:
@@ -199,7 +199,8 @@ try:
     check("member sees own tasks", "Weld parameter trials (30 samples)" in sk and "Update PFMEA for the new welding cell" in sk, sk)
     check("member sees the main task of her sub-task", "Install second laser welding station" in sk, sk)
     check("member sees sibling sub-tasks", "Operator SOP for station 2" in sk, sk)
-    check("member does not see colleague's unrelated task", "Operator training - shift B" not in sk, sk)
+    check("a project member sees colleagues' tasks in the same project", "Operator training - shift B" in sk, sk)
+    check("... but not other teams' routine work", "Daily 5S audit - this week" not in sk, sk)
     check("member does not see colleague's proposal", "Poka-yoke fixture for cell polarity check" not in sk, sk)
     sa = sync(anita)
     check("management head sees every task", len(sa["tasks"]) == total, (len(sa["tasks"]), total))
@@ -342,7 +343,8 @@ try:
     rid = r["id"]
     s, r = call("POST", f"/requests/{rid}/withdraw", {}, manoj)
     check("member withdraws own proposal", s == 200, r)
-    s, r = call("POST", "/requests", {"type": "SELF_PROPOSAL", "project_id": weld["project_id"], "title": "Fixture rack idea",
+    prdr_id = find(sync(vik)["projects"], code="PRDR")[0]["id"]   # routine work: visible by team, no member list
+    s, r = call("POST", "/requests", {"type": "SELF_PROPOSAL", "project_id": prdr_id, "title": "Fixture rack idea",
                                       "due_date": "2030-01-12"}, manoj)
     prid = r["id"]
     rs = sync(rahul)
@@ -417,7 +419,11 @@ try:
     th.join()
     d, dt = res["r2"]
     check("unrelated change does not wake other users", d.get("empty") and dt >= 1.8, (dt, d))
-    ot = task_by_title(manoj, "Operator training - shift B")
+    # project members keep seeing a project's work after a task moves on - so losing access is checked on routine work
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Operator training - shift C", "due_date": "2030-01-20",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2}, vik)
+    call("POST", f"/tasks/{r['id']}/comments", {"body": "Shift C roster attached"}, vik)
+    ot = task_by_title(manoj, "Operator training - shift C")
     st = sync(manoj)
     stp = sync(pooja)
     s, r = call("PATCH", f"/tasks/{ot['id']}", {"assignee_id": pooja_u["id"], "dept_id": L1}, vik)
@@ -542,6 +548,272 @@ try:
     s, r = call("POST", "/admin/departments", {"code": "TEST", "name": "Test team"}, admin)
     check("a department code that clashes with a project code is refused cleanly", s == 409, r)
 
+    print("== v1.1: project members, helpers, dependencies, milestones, repeats, mentions, help in the department")
+    amit_id = amit_u["id"]
+    s, r = call("POST", "/projects", {"code": "PACK", "name": "Pack line upgrade", "dept_id": PRD,
+                                      "members": [sneha_u["id"], pooja_u["id"]]}, vik)
+    check("a project is created with members", s == 200, r)
+    pack = r["id"]
+    d = sync(sneha)
+    pm = {x["user_id"] for x in d["project_members"] if x["project_id"] == pack and x["active"]}
+    check("members (and the owner) are listed for project members", pm == {sneha_u["id"], pooja_u["id"], vik_u["id"]}, pm)
+    check("a member sees the new project", any(p["id"] == pack for p in d["projects"]))
+    s, r = call("POST", "/tasks", {"project_id": pack, "title": "Rework conveyor guards", "due_date": "2030-04-30",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "is_milestone": 1}, vik)
+    guards = r["id"]
+    check("whoever is given a task joins the project", any(x["project_id"] == pack and x["user_id"] == manoj_u["id"]
+                                                         for x in sync(vik)["project_members"]))
+    check("a milestone is stored", task_by_title(vik, "Rework conveyor guards")["is_milestone"] == 1)
+    check("members see a colleague's task in their project", task_by_title(sneha, "Rework conveyor guards") is not None)
+    check("... from another team too", task_by_title(pooja, "Rework conveyor guards") is not None)
+    s1 = call("POST", f"/tasks/{guards}/start", {}, sneha)[0]
+    s2 = call("POST", f"/tasks/{guards}/cancel", {"comment": "x"}, sneha)[0]
+    s3 = call("PATCH", f"/tasks/{guards}", {"title": "x", "row_version": task_by_title(vik, "Rework conveyor guards")["row_version"]}, sneha)[0]
+    check("members cannot act on others' tasks (start, cancel, edit)", (s1, s2, s3) == (403, 403, 403), (s1, s2, s3))
+    check("members may comment on the project's tasks", call("POST", f"/tasks/{guards}/comments", {"body": "Guards drawing is on the share"}, sneha)[0] == 200)
+    check("people outside the project do not see its work", task_by_title(amit, "Rework conveyor guards") is None and
+          call("GET", f"/tasks/{guards}", token=amit)[0] == 404)
+    check("only the owner or department managers add members",
+          call("POST", f"/projects/{pack}/members", {"user_ids": [amit_id]}, sneha)[0] == 403)
+    check("routine work has no member list",
+          call("POST", f"/projects/{prdr_id}/members", {"user_ids": [amit_id]}, vik)[0] == 400)
+    check("the owner cannot be removed", call("DELETE", f"/projects/{pack}/members/{vik_u['id']}", None, vik)[0] == 400)
+    pst = sync(pooja)
+    s, r = call("DELETE", f"/projects/{pack}/members/{pooja_u['id']}", None, vik)
+    d = sync(pooja, pst["cursor"], pst["scope_ver"])
+    check("a removed member's app downloads everything again, without the project's work",
+          s == 200 and d["full"] and not any(t["id"] == guards for t in d["tasks"]), (s, d.get("full")))
+
+    # people who also work on a task (the assignee stays responsible)
+    ns = sync(sneha)
+    s, r = call("PATCH", f"/tasks/{guards}", {"helpers": [sneha_u["id"]], "row_version": task_by_title(vik, "Rework conveyor guards")["row_version"]}, vik)
+    d = sync(sneha, ns["cursor"], ns["scope_ver"])
+    check("a manager adds a colleague who also works on the task", s == 200 and
+          any(x["task_id"] == guards and x["user_id"] == sneha_u["id"] and x["active"] for x in d["task_members"]), (s, r))
+    check("... who is told", [x for x in d.get("notifications", []) if x["type"] == "HELPER_ADDED" and x["task_id"] == guards])
+    check("a helper cannot mark the task complete", call("POST", f"/tasks/{guards}/submit", {"note": "done"}, sneha)[0] == 403)
+    ns = sync(sneha)
+    call("POST", f"/tasks/{guards}/comments", {"body": "Started on the left side"}, manoj)
+    check("helpers hear about comments", [x for x in notifs(sneha, ns["cursor"]) if x["type"] == "COMMENT" and x["task_id"] == guards])
+    s, r = call("PATCH", f"/tasks/{guards}", {"helpers": [sneha_u["id"], pooja_u["id"]],
+                                              "row_version": task_by_title(rahul, "Rework conveyor guards")["row_version"]}, rahul)
+    check("a sub-department head cannot add someone from another team", s == 403, r)
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Kitting rack 5S", "due_date": "2030-02-20",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "helpers": [sneha_u["id"]]}, rahul)
+    kit = r["id"]
+    check("on routine work a helper sees the task she helps on", s == 200 and task_by_title(sneha, "Kitting rack 5S") is not None, r)
+    ns = sync(sneha)
+    call("PATCH", f"/tasks/{kit}", {"helpers": [], "row_version": task_by_title(rahul, "Kitting rack 5S")["row_version"]}, rahul)
+    d = sync(sneha, ns["cursor"], ns["scope_ver"])
+    check("removing a helper takes the routine task away from her", d["full"] and not any(t["id"] == kit for t in d["tasks"]), d.get("full"))
+
+    # dependencies (finish-to-start)
+    s, r = call("POST", "/tasks", {"project_id": pack, "title": "Order guard panels", "due_date": "2030-03-15",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2}, vik)
+    order = r["id"]
+    s, r = call("POST", "/tasks", {"project_id": pack, "title": "Fit guard panels", "due_date": "2030-04-15",
+                                   "assignee_id": sneha_u["id"], "dept_id": L2, "depends_on": [order]}, vik)
+    fit = r["id"]
+    deps = [x for x in sync(sneha)["task_deps"] if x["task_id"] == fit and x["active"]]
+    check("a task can wait for another", s == 200 and deps and deps[0]["depends_on"] == order, (s, r, deps))
+    s, r = call("PATCH", f"/tasks/{order}", {"depends_on": [fit], "row_version": task_by_title(vik, "Order guard panels")["row_version"]}, vik)
+    check("waiting in a circle is refused", s == 400 and "circle" in r.get("error", ""), r)
+    s, r = call("PATCH", f"/tasks/{fit}", {"depends_on": [kit], "row_version": task_by_title(vik, "Fit guard panels")["row_version"]}, vik)
+    check("waiting for a task of another project is refused", s == 400, r)
+    ns = sync(sneha)
+    call("POST", f"/tasks/{order}/submit", {"note": "Panels ordered, PO 4471"}, manoj)
+    s, r = call("POST", f"/tasks/{order}/approve", {}, rahul)
+    check("when it is done, the waiting task's owner hears she can start",
+          s == 200 and [x for x in notifs(sneha, ns["cursor"]) if x["type"] == "CAN_START" and x["task_id"] == fit], (s, r))
+
+    # repeating tasks
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Weekly torque check", "due_date": "2030-03-04",
+                                   "start_date": "2030-03-03", "assignee_id": manoj_u["id"], "dept_id": L2, "recur": "WEEKLY"}, rahul)
+    wk = r["id"]
+    call("POST", f"/tasks/{wk}/submit", {"note": "All tools within 2 %"}, manoj)
+    call("POST", f"/tasks/{wk}/approve", {}, rahul)
+    series = [t for t in sync(rahul)["tasks"] if t["title"] == "Weekly torque check"]
+    nxt = [t for t in series if t["id"] != wk]
+    check("a weekly task creates the next one when it is done",
+          len(nxt) == 1 and nxt[0]["due_date"] == "2030-03-11" and nxt[0]["start_date"] == "2030-03-10" and nxt[0]["status"] == "TODO"
+          and nxt[0]["recur"] == "WEEKLY", [(t["due_date"], t["status"], t["recur"]) for t in series])
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Monthly gauge audit", "due_date": "2030-01-31",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "recur": "MONTHLY"}, rahul)
+    call("POST", f"/tasks/{r['id']}/submit", {"note": "ok"}, manoj)
+    call("POST", f"/tasks/{r['id']}/approve", {}, rahul)
+    feb = [t["due_date"] for t in sync(rahul)["tasks"] if t["title"] == "Monthly gauge audit" and t["status"] == "TODO"]
+    check("a monthly task due on the 31st comes back on the last day of the next month", feb == ["2030-02-28"], feb)
+    for _ in range(2):  # Feb 28 -> Mar 31 -> Apr 30: the series keeps to month ends, it does not drift to the 28th
+        cur = [t for t in sync(rahul)["tasks"] if t["title"] == "Monthly gauge audit" and t["status"] == "TODO"][0]
+        call("POST", f"/tasks/{cur['id']}/submit", {"note": "ok"}, manoj)
+        call("POST", f"/tasks/{cur['id']}/approve", {}, rahul)
+    dues = sorted(t["due_date"] for t in sync(rahul)["tasks"] if t["title"] == "Monthly gauge audit")
+    check("a monthly series due on the 31st stays on month ends", dues == ["2030-01-31", "2030-02-28", "2030-03-31", "2030-04-30"], dues)
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Main with subs", "due_date": "2030-05-31",
+                                   "assignee_id": rahul_u["id"], "dept_id": L2}, rahul)
+    main_r = r["id"]
+    s, r = call("POST", "/tasks", {"parent_id": main_r, "title": "Weekly sub", "due_date": "2030-05-10", "assignee_id": manoj_u["id"],
+                                   "dept_id": L2, "recur": "WEEKLY"}, rahul)
+    check("a sub-task cannot repeat (it would keep its main task open)", s == 400 and "main tasks" in r.get("error", ""), (s, r))
+    s, r = call("POST", "/tasks", {"parent_id": main_r, "title": "Plain sub", "due_date": "2030-05-10", "assignee_id": manoj_u["id"],
+                                   "dept_id": L2}, rahul)
+    sub_r = r["id"]
+    tv = call("GET", f"/tasks/{sub_r}", None, rahul)[1]["task"]
+    s, r = call("PATCH", f"/tasks/{sub_r}", {"recur": "WEEKLY", "row_version": tv["row_version"]}, rahul)
+    check("a sub-task cannot be set to repeat later either", s == 400, (s, r))
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "Daily line walk", "due_date": "2020-01-01",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "recur": "DAILY"}, rahul)
+    call("POST", f"/tasks/{r['id']}/submit", {"note": "ok"}, manoj)
+    call("POST", f"/tasks/{r['id']}/approve", {}, rahul)
+    today = sync(rahul)["today"]
+    dl = [t["due_date"] for t in sync(rahul)["tasks"] if t["title"] == "Daily line walk" and t["status"] == "TODO"]
+    check("a late repeating task comes back from today, not in the past", dl == [today], (dl, today))
+    check("repeat must be daily, weekly or monthly",
+          call("POST", "/tasks", {"project_id": prdr_id, "title": "x", "due_date": "2030-01-01", "assignee_id": manoj_u["id"],
+                                  "dept_id": L2, "recur": "HOURLY"}, rahul)[0] == 400)
+
+    # @mentions
+    ms, am = sync(manoj), sync(amit)
+    call("POST", f"/tasks/{fit}/comments", {"body": "@Manoj Patil can you share the panel drawing? cc @Amit Kumar"}, sneha)
+    mn = [x["type"] for x in notifs(manoj, ms["cursor"]) if x["task_id"] == fit]
+    check("a mentioned colleague is notified once, as a mention", mn.count("MENTION") == 1 and "COMMENT" not in mn, mn)
+    check("someone who cannot open the task is not notified", not [x for x in notifs(amit, am["cursor"]) if x["task_id"] == fit])
+
+    # help from another team of the same department
+    s, r = call("POST", "/tasks", {"project_id": pack, "title": "Validate guard interlocks", "due_date": "2030-05-10",
+                                   "assignee_id": sneha_u["id"], "dept_id": L2}, vik)
+    gi = r["id"]
+    vs, rs = sync(vik), sync(rahul)
+    s, r = call("POST", "/requests", {"type": "TEAM_HELP", "parent_task_id": gi, "title": "Interlock test rig from Line 1",
+                                      "needed_by": "2030-05-01", "suggested_assignee_id": pooja_u["id"]}, sneha)
+    hq = r.get("id")
+    check("a member asks a colleague of another team in her department", s == 200, r)
+    check("... the department head is asked to decide", [x for x in notifs(vik, vs["cursor"]) if x["type"] == "HELP_REQUEST" and x["request_id"] == hq])
+    check("... the asking team's head is kept informed and sees the request",
+          [x for x in notifs(rahul, rs["cursor"]) if x["type"] == "HELP_ASKED" and x["task_id"] == gi]
+          and any(q["id"] == hq for q in sync(rahul)["requests"]))
+    rs = sync(rahul)
+    check("... her own team's head cannot assign someone of another team",
+          call("POST", f"/requests/{hq}/approve", {"assignee_id": pooja_u["id"]}, rahul)[0] == 403)
+    ss = sync(suresh)
+    s, r = call("POST", f"/requests/{hq}/approve", {"assignee_id": pooja_u["id"]}, vik)
+    ht = task_by_title(vik, "Interlock test rig from Line 1")
+    check("the department head assigns the colleague", s == 200 and ht and ht["dept_id"] == L1 and ht["parent_id"] == gi, (s, r))
+    check("... her head is told where she helps", [x for x in notifs(suresh, ss["cursor"]) if x["type"] == "HELP_GIVEN"])
+    check("... and the asking team's head sees the help", task_by_title(rahul, "Interlock test rig from Line 1") is not None)
+    check("... and is told who will help", [x for x in notifs(rahul, rs["cursor"]) if x["type"] == "HELP_GIVEN"])
+    s, r = call("POST", "/requests", {"type": "TEAM_HELP", "parent_task_id": gi, "title": "x", "suggested_assignee_id": amit_id}, sneha)
+    check("help from another department goes through 'Request work from another team'", s == 400 and "another team" in r.get("error", ""), r)
+
+    # ---- who may use a project; membership that sticks or ends; helpers; dependencies on hidden work
+    print("== v1.1: project access and membership rules")
+    meera, meera_u = login("meera@demo.local")
+    allp = sync(admin)["projects"]
+    line2_id, gen3_id, cellq_id = (find(allp, code=c)[0]["id"] for c in ("LINE2", "GEN3", "CELLQ"))
+    s, r = call("POST", "/tasks", {"project_id": line2_id, "title": "x", "due_date": "2030-01-10", "assignee_id": neha_u["id"],
+                                   "dept_id": QUA}, neha)
+    check("a head cannot put work into another department's project (and so join it)", s == 403 and "not part of" in r.get("error", ""), r)
+    s, r = call("POST", "/requests", {"type": "SELF_PROPOSAL", "project_id": gen3_id, "title": "x", "due_date": "2030-02-01"}, amit)
+    check("nobody proposes work in a project they are not part of", s == 403 and "not part of" in r.get("error", ""), r)
+    s, r = call("POST", "/requests", {"type": "CROSS_TEAM", "target_dept_id": MEC, "project_id": cellq_id, "title": "Bracket",
+                                      "needed_by": "2030-03-01"}, meera)
+    check("a request to another team cannot name a project the requester is not part of", s == 403 and "not part of" in r.get("error", ""), r)
+    s, r = call("POST", "/tasks", {"project_id": find(allp, code="QUAR")[0]["id"] if find(allp, code="QUAR") else prdr_id,
+                                   "title": "IQC plan for moving", "due_date": "2030-02-10", "assignee_id": lakshmi_u["id"]}, neha)
+    lt = task_by_title(neha, "IQC plan for moving")
+    s, r = call("PATCH", f"/tasks/{lt['id']}", {"project_id": gen3_id, "row_version": lt["row_version"]}, neha)
+    check("work cannot be moved into a project one is not part of", s == 403 and "not part of" in r.get("error", ""), r)
+
+    s, r = call("POST", "/projects", {"code": "SECR", "name": "Confidential layout", "dept_id": PRD}, vik)
+    secr = r["id"]
+    call("POST", "/tasks", {"project_id": secr, "title": "Layout options", "due_date": "2030-06-30", "assignee_id": manoj_u["id"],
+                            "dept_id": L2}, vik)
+    s, r = call("POST", "/tasks", {"project_id": secr, "title": "Floor measurements", "due_date": "2030-06-30",
+                                   "assignee_id": pooja_u["id"], "dept_id": L1}, vik)
+    fm = r["id"]
+    check("given a task by the owner, a person sees the project's other work", task_by_title(pooja, "Layout options") is not None)
+    call("DELETE", f"/projects/{secr}/members/{pooja_u['id']}", None, vik)
+    s, r = call("POST", "/tasks", {"parent_id": fm, "title": "Measure bay 3", "due_date": "2030-06-01", "assignee_id": pooja_u["id"]}, pooja)
+    check("a removed member does not come back by adding a sub-task to her own task",
+          s == 200 and task_by_title(pooja, "Layout options") is None, (s, r))
+    check("... she keeps her own task", task_by_title(pooja, "Floor measurements") is not None)
+    call("POST", f"/projects/{secr}/members", {"user_ids": [pooja_u["id"]]}, vik)
+    check("added again by hand, she sees the project again", task_by_title(pooja, "Layout options") is not None)
+    s, r = call("POST", "/tasks", {"project_id": secr, "title": "Cable route check", "due_date": "2030-06-20",
+                                   "assignee_id": sneha_u["id"], "dept_id": L2}, vik)
+    crc = r["id"]
+    check("(she sees the project while she has work in it)", task_by_title(sneha, "Layout options") is not None)
+    t = task_by_title(vik, "Cable route check")
+    call("PATCH", f"/tasks/{crc}", {"assignee_id": manoj_u["id"], "dept_id": L2, "row_version": t["row_version"]}, vik)
+    check("when her only task there goes to someone else, the project's work leaves her app",
+          task_by_title(sneha, "Layout options") is None and task_by_title(sneha, "Cable route check") is None)
+    s, r = call("POST", "/tasks", {"project_id": secr, "title": "Guard drawings", "due_date": "2030-06-25",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "helpers": [sneha_u["id"]]}, vik)
+    check("a helper sees the task she helps on, not the rest of the project",
+          s == 200 and task_by_title(sneha, "Guard drawings") is not None and task_by_title(sneha, "Layout options") is None, (s, r))
+    s, r = call("POST", "/tasks", {"project_id": secr, "title": "Short job", "due_date": "2030-06-21", "assignee_id": suresh_u["id"], "dept_id": L1}, vik)
+    sj = r["id"]
+    seen = task_by_title(suresh, "Layout options") is not None
+    call("POST", f"/tasks/{sj}/cancel", {"comment": "Not needed"}, vik)
+    check("when a person's only task there is cancelled, the project leaves their app",
+          seen and task_by_title(suresh, "Layout options") is None, seen)
+    check("people outside a project do not receive its member list",
+          not [x for x in sync(suresh)["project_members"] if x["project_id"] == line2_id])
+    s, r = call("PATCH", f"/projects/{secr}", {"owner_id": rahul_u["id"]}, vik)
+    d = sync(rahul)
+    check("a project can be handed to a new owner, who then sees all of it",
+          s == 200 and find(d["projects"], id=secr)[0]["owner_id"] == rahul_u["id"] and task_by_title(rahul, "Floor measurements") is not None,
+          (s, r))
+
+    print("== v1.1: dependencies and helpers - edge cases")
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "RV main", "due_date": "2030-07-31", "assignee_id": manoj_u["id"],
+                                   "dept_id": L2}, rahul)
+    rvm = r["id"]
+    rv1 = call("POST", "/tasks", {"parent_id": rvm, "title": "RV sub 1", "due_date": "2030-07-01", "assignee_id": manoj_u["id"],
+                                  "dept_id": L2}, rahul)[1]["id"]
+    call("POST", "/tasks", {"parent_id": rvm, "title": "RV sub 2", "due_date": "2030-07-01", "assignee_id": manoj_u["id"], "dept_id": L2}, rahul)
+    before = task_by_title(rahul, "RV sub 2")["row_version"]
+    s, r = call("PATCH", f"/tasks/{rv1}", {"helpers": [sneha_u["id"]], "row_version": task_by_title(rahul, "RV sub 1")["row_version"]}, rahul)
+    check("adding a helper does not make an edit of a sibling task fail", s == 200 and task_by_title(rahul, "RV sub 2")["row_version"] == before,
+          (s, r))
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "L1 fixture check", "due_date": "2030-03-01",
+                                   "assignee_id": pooja_u["id"], "dept_id": L1}, vik)
+    l1fx = r["id"]
+    s, r = call("POST", "/tasks", {"project_id": prdr_id, "title": "L2 fixture swap", "due_date": "2030-03-10",
+                                   "assignee_id": manoj_u["id"], "dept_id": L2, "depends_on": [l1fx]}, vik)
+    l2fx = r["id"]
+    rows = [x for x in sync(rahul)["task_deps"] if x["task_id"] == l2fx and x["active"]]
+    check("a dependency on a task one cannot open arrives without its id",
+          len(rows) == 1 and rows[0]["depends_on"] == 0 and rows[0].get("hidden") == 1 and rows[0].get("done") == 0, rows)
+    det = call("GET", f"/tasks/{l2fx}", token=manoj)[1]["task_deps"]
+    check("... also in the task's details", det and all(x["depends_on"] == 0 for x in det), det)
+    t = task_by_title(rahul, "L2 fixture swap")
+    s, r = call("PATCH", f"/tasks/{l2fx}", {"title": "L2 fixture swap (both shifts)", "depends_on": [], "helpers": [],
+                                            "row_version": t["row_version"]}, rahul)
+    still = [x for x in sync(vik)["task_deps"] if x["task_id"] == l2fx and x["active"]]
+    check("the task's manager can edit it; the dependency he cannot see stays",
+          s == 200 and len(still) == 1 and still[0]["depends_on"] == l1fx, (s, r, still))
+    ms, rs = sync(manoj), sync(rahul)
+    call("POST", f"/tasks/{l1fx}/cancel", {"comment": "Fixture replaced"}, vik)
+    check("when the awaited task is cancelled, the waiting task's owner hears he can start",
+          [x for x in notifs(manoj, ms["cursor"]) if x["type"] == "CAN_START" and x["task_id"] == l2fx])
+    rows = [x for x in sync(rahul, rs["cursor"], rs["scope_ver"]).get("task_deps", []) if x["task_id"] == l2fx and x["active"]]
+    check("... and the hidden dependency shows as finished", rows and rows[0]["done"] == 1, rows)
+    s, r = call("POST", "/requests", {"type": "SELF_PROPOSAL", "project_id": pack, "title": "Poka-yoke idea", "due_date": "2030-05-01"}, sneha)
+    s2, r2 = call("POST", "/tasks", {"project_id": pack, "title": "Waits for an idea", "due_date": "2030-05-20", "assignee_id": manoj_u["id"],
+                                     "dept_id": L2, "depends_on": [r.get("task_id", 0) or 1]}, vik)
+    check("a task cannot wait for a mere proposal", s == 200 and s2 == 400, (s, r, s2, r2))
+    s, r = call("POST", "/tasks", {"project_id": pack, "title": "Cycle main", "due_date": "2030-08-31", "assignee_id": manoj_u["id"],
+                                   "dept_id": L2}, vik)
+    cm = r["id"]
+    cs = call("POST", "/tasks", {"parent_id": cm, "title": "Cycle sub", "due_date": "2030-08-01", "assignee_id": manoj_u["id"],
+                                 "dept_id": L2}, vik)[1]["id"]
+    call("POST", "/tasks", {"project_id": pack, "title": "Cycle X", "due_date": "2030-08-15", "assignee_id": manoj_u["id"], "dept_id": L2,
+                            "depends_on": [cm]}, vik)
+    cx = task_by_title(vik, "Cycle X")["id"]
+    s, r = call("PATCH", f"/tasks/{cs}", {"depends_on": [cx], "row_version": task_by_title(vik, "Cycle sub")["row_version"]}, vik)
+    check("a circle through the main task is refused", s == 400 and "circle" in r.get("error", ""), r)
+
     test_tok = tmp_tok
     st = sync(test_tok)
     s, ms = call("GET", "/admin/users", token=admin)
@@ -631,6 +903,43 @@ try:
         pass
     check("server stops within a few seconds while instant-update requests are held",
           proc.poll() is not None and time.time() - t0 < 8, f"{time.time() - t0:.1f} s")
+
+    # ---- morning digest (command line; the running server sends it daily at digest_time)
+    print("\n== morning digest")
+    ini = os.path.join(WORK, "server.ini")
+    r = subprocess.run(CMD + ["--config", ini, "--digest-now"], cwd=WORK, capture_output=True, text=True, timeout=120)
+    check("digest refuses while e-mail is switched off", r.returncode == 1 and "switched off" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-200:])
+    with open(ini, "a") as f:
+        f.write("email_enabled = 1\nsmtp_host = 127.0.0.1\nsmtp_port = 9\nsmtp_security = none\nsmtp_from = t@x.in\n")
+    r = subprocess.run(CMD + ["--config", ini, "--digest-now"], cwd=WORK, capture_output=True, text=True, timeout=120)
+    import sqlite3
+    dbc = sqlite3.connect(os.path.join(WORK, "taskflow.db"))
+    mails = dbc.execute("SELECT to_email, subject, body FROM email_outbox WHERE subject LIKE '[TaskFlow] Your day:%'").fetchall()
+    check("digest queues e-mails", r.returncode == 0 and len(mails) > 0, (r.stdout + r.stderr)[-200:])
+    tomorrow = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+    def has_reason(email):
+        uid, st = dbc.execute("SELECT id, status FROM users WHERE email=?", (email,)).fetchone()
+        if st != "ACTIVE":
+            return False
+        own = dbc.execute("SELECT COUNT(*) FROM tasks WHERE assignee_id=? AND status IN ('TODO','IN_PROGRESS','ON_HOLD') "
+                          "AND due_date<>'' AND due_date<=?", (uid, tomorrow)).fetchone()[0]
+        lead = dbc.execute("SELECT COUNT(*) FROM memberships WHERE user_id=? AND active=1 AND role IN ('HEAD','DEPUTY')",
+                           (uid,)).fetchone()[0]
+        mgmt = dbc.execute("SELECT COUNT(*) FROM memberships m JOIN departments d ON d.id=m.dept_id WHERE m.user_id=? "
+                           "AND m.active=1 AND d.is_management=1", (uid,)).fetchone()[0]
+        return own > 0 or lead > 0 or mgmt > 0
+    check("digest goes only to active people with something to act on", all(has_reason(m[0]) for m in mails),
+          [m[0] for m in mails if not has_reason(m[0])])
+    check("one digest per person", len({m[0] for m in mails}) == len(mails))
+    idle = dbc.execute("SELECT u.email FROM users u WHERE u.status='ACTIVE' AND NOT EXISTS (SELECT 1 FROM tasks t WHERE "
+                       "t.assignee_id=u.id AND t.status IN ('TODO','IN_PROGRESS','ON_HOLD') AND t.due_date<>'' AND t.due_date<=?) "
+                       "AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.user_id=u.id AND m.active=1 AND m.role IN ('HEAD','DEPUTY')) "
+                       "AND NOT EXISTS (SELECT 1 FROM memberships m JOIN departments d ON d.id=m.dept_id WHERE m.user_id=u.id AND m.active=1 "
+                       "AND d.is_management=1)", (tomorrow,)).fetchall()
+    check("people with nothing due get no digest", len(idle) > 0 and not ({i[0] for i in idle} & {m[0] for m in mails}))
+    check("digest lists overdue work by task key", any("Overdue" in m[2] and "-" in m[2] for m in mails))
+    dbc.close()
 finally:
     proc.terminate()
     try:

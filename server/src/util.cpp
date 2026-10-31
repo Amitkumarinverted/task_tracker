@@ -75,6 +75,27 @@ std::string add_days(const std::string& ymd, int days) {
   return buf;
 }
 
+int days_between(const std::string& a, const std::string& b) {
+  int y1, y2; unsigned m1, d1, m2, d2;
+  if (sscanf(a.c_str(), "%d-%u-%u", &y1, &m1, &d1) != 3 || sscanf(b.c_str(), "%d-%u-%u", &y2, &m2, &d2) != 3) return 0;
+  return (int)(days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1));
+}
+
+std::string next_occurrence(const std::string& ymd, const std::string& recur, int anchor_day) {
+  if (recur == "DAILY") return add_days(ymd, 1);
+  if (recur == "WEEKLY") return add_days(ymd, 7);
+  int y; unsigned m, d;
+  if (recur != "MONTHLY" || sscanf(ymd.c_str(), "%d-%u-%u", &y, &m, &d) != 3) return ymd;
+  if (++m > 12) { m = 1; y++; }
+  if (anchor_day >= 1 && anchor_day <= 31) d = (unsigned)anchor_day;  // a series due on the 31st stays on month ends
+  static const unsigned len[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  unsigned last = len[m - 1] + ((m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) ? 1 : 0);
+  if (d > last) d = last;  // 31 Jan -> 28/29 Feb
+  char buf[16];
+  snprintf(buf, sizeof buf, "%04d-%02u-%02u", y, m, d);
+  return buf;
+}
+
 static std::tm utc_tm(std::time_t t) {
   std::tm g{};
 #ifdef _WIN32

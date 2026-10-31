@@ -121,11 +121,13 @@ std::set<int64_t> App::related_tasks(int64_t task_id) {
 
 // Everyone who could possibly see these tasks: the people on them and the leaders of every unit involved
 // (a superset of the real viewers - far cheaper than checking every user of the company).
-std::set<int64_t> App::viewer_candidates(const std::set<int64_t>& task_ids) {
-  std::set<int64_t> c, units;
+std::set<int64_t> App::viewer_candidates(const std::set<int64_t>& task_ids, bool with_project_members) {
+  std::set<int64_t> c, units, projects;
   for (auto id : task_ids) {
-    json t = db.one("SELECT assignee_id, created_by, requested_by, dept_id, requesting_dept_id FROM tasks WHERE id=?", {id});
+    json t = db.one("SELECT assignee_id, created_by, requested_by, dept_id, requesting_dept_id, project_id FROM tasks WHERE id=?", {id});
     if (t.is_null()) continue;
+    for (auto h : task_helpers(id)) c.insert(h);
+    projects.insert(jint(t, "project_id"));
     for (const char* k : {"assignee_id", "created_by", "requested_by"})
       if (jint(t, k)) c.insert(jint(t, k));
     for (const char* k : {"dept_id", "requesting_dept_id"})
@@ -137,6 +139,11 @@ std::set<int64_t> App::viewer_candidates(const std::set<int64_t>& task_ids) {
   if (int64_t mg = management_unit()) units.insert(mg);
   for (auto u : units)
     for (auto l : leaders(u)) c.insert(l);
+  for (auto p : projects) {
+    if (with_project_members)
+      for (auto m : project_members(p)) c.insert(m);
+    if (int64_t o = jint(db.one("SELECT owner_id FROM projects WHERE id=? AND is_routine=0", {p}), "owner_id")) c.insert(o);
+  }
   return c;
 }
 
@@ -208,8 +215,112 @@ App::VisCtx App::build_vis(const UserCtx& u) {
     v.my_tasks.insert(r["id"].get<int64_t>());
     if (!r["parent_id"].is_null()) v.parents_of_mine.insert(r["parent_id"].get<int64_t>());
   }
+  // a task I help on counts like my own: I see it, its sub-tasks, its parent and siblings
+  for (auto& r : db.query("SELECT t.id, t.parent_id FROM task_members m JOIN tasks t ON t.id=m.task_id "
+                          "WHERE m.user_id=? AND m.active=1", {u.id})) {
+    v.helping.insert(jint(r, "id"));
+    v.my_tasks.insert(jint(r, "id"));
+    if (jint(r, "parent_id")) v.parents_of_mine.insert(jint(r, "parent_id"));
+  }
+  for (auto& r : db.query("SELECT pm.project_id AS id FROM project_members pm JOIN projects p ON p.id=pm.project_id "
+                          "WHERE pm.user_id=? AND pm.active=1 AND p.is_routine=0 "
+                          "UNION SELECT id FROM projects WHERE owner_id=? AND is_routine=0", {u.id, u.id}))
+    v.member_projects.insert(jint(r, "id"));
   v.managed = managed_units(u);
   return v;
+}
+
+// May this person work in the project at all - add tasks, propose, move work or raise requests for it?
+// Routine work is per department and open to all; a project to its owner, its members, its department and
+// that department's managers, and management.
+bool App::can_use_project(const UserCtx& u, const json& p) {
+  if (p.is_null()) return false;
+  if (jint(p, "is_routine") || u.sees_all() || jint(p, "owner_id") == u.id) return true;
+  int64_t d = jint(p, "dept_id");
+  if (may_manage_project(u, p)) return true;
+  for (auto& kv : u.units) {
+    if (kv.first == d) return true;
+    for (auto a : ancestors(kv.first))
+      if (a == d) return true;
+  }
+  return !db.one("SELECT 1 AS x FROM project_members WHERE project_id=? AND user_id=? AND active=1", {p["id"], u.id}).is_null();
+}
+
+// the owner, the managers of the project's department, management - they decide who belongs to the project
+bool App::may_manage_project(const UserCtx& u, const json& p) {
+  if (p.is_null()) return false;
+  if (u.sees_all() || jint(p, "owner_id") == u.id) return true;
+  int64_t d = jint(p, "dept_id");
+  if (u.leads(d)) return true;
+  for (auto a : ancestors(d))
+    if (u.leads(a)) return true;
+  return false;
+}
+
+// explicit: added by hand (project created with them, People tab). Otherwise the person joins because `actor` gave
+// them work here - only when the actor may bring people in (manager of the project or a member), and never
+// after someone took them off the project by hand.
+bool App::ensure_project_member(int64_t project, int64_t user, int64_t actor, bool explicit_add) {
+  if (!project || !user) return false;
+  json p = db.one("SELECT * FROM projects WHERE id=?", {project});
+  if (p.is_null() || jint(p, "is_routine")) return false;  // routine work stays visible by department only
+  json m = db.one("SELECT id, active, removed, auto FROM project_members WHERE project_id=? AND user_id=?", {project, user});
+  if (!explicit_add) {
+    if (!m.is_null() && (jint(m, "active") || jint(m, "removed"))) return false;
+    if (jint(p, "owner_id") == user) return false;  // the owner belongs anyway
+    UserCtx a;
+    try {
+      a = load_ctx(actor);
+    } catch (...) {
+      return false;
+    }
+    bool member = !db.one("SELECT 1 AS x FROM project_members WHERE project_id=? AND user_id=? AND active=1", {project, actor}).is_null();
+    if (!may_manage_project(a, p) && !member) return false;
+  } else if (!m.is_null() && jint(m, "active")) {
+    if (jint(m, "auto")) db.exec("UPDATE project_members SET auto=0, added_by=?, seq=? WHERE id=?", {actor, next_seq(), m["id"]});
+    return false;
+  }
+  const int64_t auto_flag = explicit_add ? 0 : 1;
+  if (m.is_null())
+    db.insert("INSERT INTO project_members(project_id,user_id,active,added_by,created_at,seq,auto,removed) VALUES(?,?,1,?,?,?,?,0)",
+              {project, user, actor ? json(actor) : json(), now_iso(), next_seq(), auto_flag});
+  else
+    db.exec("UPDATE project_members SET active=1, removed=0, auto=?, added_by=?, seq=? WHERE id=?",
+            {auto_flag, actor ? json(actor) : json(), next_seq(), m["id"]});
+  db.exec("UPDATE projects SET seq=? WHERE id=?", {next_seq(), project});  // the project reaches the new member
+  // earlier work of others in the project becomes visible to them: their app downloads everything once
+  if (!db.one("SELECT 1 AS x FROM tasks WHERE project_id=? AND (assignee_id IS NULL OR assignee_id<>?) LIMIT 1", {project, user}).is_null())
+    bump_scope(user);
+  return true;
+}
+
+// Someone who joined only through their work leaves again once they have no work in the project
+// (their task was reassigned, moved or cancelled). People added by hand stay until they are removed.
+void App::release_auto_member(int64_t project, int64_t user) {
+  if (!project || !user) return;
+  json m = db.one("SELECT pm.id FROM project_members pm JOIN projects p ON p.id=pm.project_id WHERE pm.project_id=? AND pm.user_id=? "
+                  "AND pm.active=1 AND pm.auto=1 AND (p.owner_id IS NULL OR p.owner_id<>?)", {project, user, user});
+  if (m.is_null()) return;
+  if (!db.one("SELECT 1 AS x FROM tasks WHERE project_id=? AND assignee_id=? AND status NOT IN ('PROPOSED','REJECTED','CANCELLED') LIMIT 1",
+              {project, user}).is_null())
+    return;
+  db.exec("UPDATE project_members SET active=0, seq=? WHERE id=?", {next_seq(), m["id"]});
+  db.exec("UPDATE projects SET seq=? WHERE id=?", {next_seq(), project});
+  bump_scope(user);  // what they no longer see disappears from their app
+}
+
+std::set<int64_t> App::project_members(int64_t project) {
+  std::set<int64_t> s;
+  for (auto& r : db.query("SELECT pm.user_id FROM project_members pm JOIN projects p ON p.id=pm.project_id "
+                          "WHERE pm.project_id=? AND pm.active=1 AND p.is_routine=0", {project}))
+    s.insert(jint(r, "user_id"));
+  return s;
+}
+
+std::set<int64_t> App::task_helpers(int64_t task) {
+  std::set<int64_t> s;
+  for (auto& r : db.query("SELECT user_id FROM task_members WHERE task_id=? AND active=1", {task})) s.insert(jint(r, "user_id"));
+  return s;
 }
 
 bool App::can_view_task(const UserCtx& u, const json& t, const VisCtx& v) {
@@ -218,6 +329,8 @@ bool App::can_view_task(const UserCtx& u, const json& t, const VisCtx& v) {
   const bool mine = jint(t, "assignee_id") == u.id || jint(t, "created_by") == u.id;
   if (st == "PROPOSED" || st == "REJECTED") return mine || has_authority(u, jint(t, "assignee_id"), unit);
   if (u.sees_all() || mine || v.managed.count(unit)) return true;
+  if (v.helping.count(jint(t, "id"))) return true;                 // I also work on it
+  if (v.member_projects.count(jint(t, "project_id"))) return true;  // a member sees all work of the project
   if (jint(t, "requested_by") == u.id) return true;
   if (jint(t, "requesting_dept_id") && v.managed.count(jint(t, "requesting_dept_id"))) return true;
   if (jint(t, "parent_id") && v.my_tasks.count(jint(t, "parent_id"))) return true;  // sub-task of my task
@@ -235,7 +348,10 @@ bool App::can_view_request(const UserCtx& u, const json& r, const VisCtx& v) {
   }
   // proposals and help requests are personal: only the requester's managers see them (not a fellow deputy,
   // and not the deputy of a head who proposed own work)
-  return has_authority(u, jint(r, "requested_by"), jint(r, "target_dept_id"));
+  if (has_authority(u, jint(r, "requested_by"), jint(r, "target_dept_id"))) return true;
+  // help from another team of the department: the department decides, the asking team's own managers follow it
+  return jstr(r, "type") == "TEAM_HELP" && jint(r, "requesting_dept_id") && jint(r, "requesting_dept_id") != jint(r, "target_dept_id") &&
+         has_authority(u, jint(r, "requested_by"), jint(r, "requesting_dept_id"));
 }
 
 }  // namespace tf

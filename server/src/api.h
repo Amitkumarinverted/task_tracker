@@ -277,6 +277,12 @@ class Api {
                                 "('TODO','IN_PROGRESS','ON_HOLD','IN_REVIEW')", {task}), "n");
   }
   std::string label(const json& t) { return jstr(t, "key") + "  " + jstr(t, "title"); }
+  // the department a unit belongs to (the unit itself when it is a department)
+  int64_t top_unit(int64_t unit) {
+    int64_t top = unit;
+    for (auto a : app.ancestors(unit)) top = a;
+    return top;
+  }
   std::set<int64_t> request_approvers(const json& q) {
     std::string type = jstr(q, "type");
     if (type == "CROSS_TEAM") {
@@ -321,6 +327,21 @@ class Api {
   void close_pending_items(int64_t task_id, const std::string& why, const UserCtx& u);
 
   void after_done(const json& t, const UserCtx& u);
+
+  // ---- v1.1: people helping on a task, dependencies, milestones, repeating tasks, mentions
+  std::string recur_of(const json& b, const std::string& def);
+  std::vector<int64_t> id_list(const json& b, const char* key, size_t max, const std::string& what);
+  // replaces the list of people who also work on the task (the actor needs authority over each new one)
+  void set_helpers(const json& t, std::vector<int64_t> want, const UserCtx& u);
+  // replaces what the task waits for (same project, visible to the actor, no circles)
+  void set_deps(const json& t, const std::vector<int64_t>& want, const UserCtx& u);
+  bool waits_for(int64_t from, int64_t target);  // does `from` (directly or indirectly) wait for `target`?
+  void repeat_task(const json& t, const UserCtx& u);           // a repeating task creates its next occurrence when done
+  void tell_waiting_tasks(const json& done, const UserCtx& u);
+  // dependency rows as this person may see them: the far end of a task they cannot open becomes 0 ("hidden"),
+  // with only whether it is finished (so "waits for 1 more" still adds up)
+  json visible_deps(const json& rows, const UserCtx& u);  // tasks waiting for this one: "you can start"
+  std::set<int64_t> mentioned_in(const std::string& body, const json& t);
 
   // ================================================================== work requests
   void install_requests();

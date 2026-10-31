@@ -42,6 +42,7 @@ struct Config {
   std::string smtp_host, smtp_security = "starttls", smtp_user, smtp_password, smtp_from, smtp_from_name = "Inverted TaskFlow";
   int smtp_port = 587;
   bool smtp_verify_cert = true;
+  std::string digest_time = "08:30";  // morning e-mail of what needs each person ("off" = none); needs e-mail
   // testing
   bool demo = false;
   bool reset = false;
@@ -87,6 +88,8 @@ std::string iso_after_seconds(long long secs);
 std::string today_local();
 std::tm local_tm(std::time_t t);  // local time, thread-safe
 std::string add_days(const std::string& ymd, int days);
+int days_between(const std::string& from, const std::string& to);              // to - from, in days
+std::string next_occurrence(const std::string& ymd, const std::string& recur, int anchor_day = 0);  // DAILY / WEEKLY / MONTHLY
 bool valid_date(const std::string& ymd);
 std::string hdate(const std::string& ymd);  // "3 Nov 2026" (for messages people read)
 int compare_versions(const std::string& a, const std::string& b);  // <0, 0, >0
@@ -156,6 +159,8 @@ class App {
   // ---- visibility
   struct VisCtx {
     std::set<int64_t> my_tasks, parents_of_mine, managed;
+    std::set<int64_t> member_projects;  // non-routine projects the caller belongs to (or owns): all their work is visible
+    std::set<int64_t> helping;          // tasks the caller also works on (task members)
   };
   VisCtx build_vis(const UserCtx& u);
   bool can_view_task(const UserCtx& u, const json& t, const VisCtx& v);
@@ -174,9 +179,21 @@ class App {
   std::set<int64_t> requester_side(const json& t);
   // ---- lost access ("tombstones"): who stops seeing a task when it is reassigned or moved
   std::set<int64_t> related_tasks(int64_t task_id);  // the task, its parent, siblings and sub-tasks
-  std::set<int64_t> viewer_candidates(const std::set<int64_t>& task_ids);  // everyone who might see them (superset)
+  // everyone who might see them (superset); project members can be left out when the work stays in its project
+  // (they keep seeing it - anyone leaving the project is handled by release_auto_member)
+  std::set<int64_t> viewer_candidates(const std::set<int64_t>& task_ids, bool with_project_members = true);
   std::map<int64_t, std::set<int64_t>> task_viewers(const std::set<int64_t>& task_ids, const std::set<int64_t>& candidates);
   void record_revocations(const std::map<int64_t, std::set<int64_t>>& before, const std::map<int64_t, std::set<int64_t>>& after);
+
+  // ---- project members and task members (v1.1)
+  // Adds the person to a non-routine project (or re-activates them); true if they were not a member. Their app then
+  // downloads everything once, because the project's other work becomes visible.
+  bool ensure_project_member(int64_t project, int64_t user, int64_t actor, bool explicit_add = false);
+  void release_auto_member(int64_t project, int64_t user);  // joined through work, no work left there: leaves
+  bool can_use_project(const UserCtx& u, const json& p);     // may add / propose / move work into it
+  bool may_manage_project(const UserCtx& u, const json& p);  // owner, its department's managers, management
+  std::set<int64_t> project_members(int64_t project);  // active members (non-routine projects only)
+  std::set<int64_t> task_helpers(int64_t task);        // people who also work on the task
 
   // ---- tasks
   json get_task(int64_t id);                 // throws 404
@@ -188,6 +205,7 @@ class App {
 
   // ---- background jobs
   void run_reminders();
+  int run_digest();  // the morning e-mail: overdue, due today / tomorrow, decisions waiting; returns e-mails queued
   bool run_backup(std::string* out_path = nullptr, std::string* err = nullptr);
 };
 

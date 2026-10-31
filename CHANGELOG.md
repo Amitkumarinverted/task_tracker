@@ -4,6 +4,51 @@ Each release is published with `release_to_git.bat`. Add a section for the new v
 (same number as `TF_VERSION` in `common/version.h`) before releasing - its text becomes the
 release notes that users see in the update window.
 
+## [1.1.0] - 2026-10-31
+
+Teamwork release: boards and timelines everywhere, project members, more people on one task, dependencies.
+
+- **Board and timeline views.** My tasks, My team, the department view and every project switch between List,
+  Board and Timeline. On the board, drag a card to start it, put it on hold, mark it complete or approve it -
+  each person can only move what they are allowed to. The team timeline shows each person's open work on one chart.
+- **Project members.** Add people when you create a project, or later on its new People tab. People given a task in
+  it by the project's owner, its managers or a member join automatically, and leave again when that work goes to
+  someone else, moves or is cancelled; someone removed by hand comes back only when added again. Members see every
+  task of the project, its board, timeline and progress, and act only on their own tasks. Only the project's own
+  people (and its department) can add, propose, move or request work in it. The owner can hand the project over
+  (Edit project > Owner).
+- **More than one person on a task.** "Also working on it": those people see the task (with its main task and
+  sub-tasks) in My tasks (Helping on), hear about its changes and comment; the person it is assigned to stays
+  responsible and marks it complete. Helping on one task does not open the whole project.
+- **Help from your whole department.** Ask a colleague of another team of your department for help; the department
+  head approves, and both teams' heads are kept informed.
+- **Dependencies.** "Can start when these are done": the timeline draws arrows and shows clashes in red, the task
+  lists what it waits for, its owner is told when they can start (also when the awaited work is cancelled), and
+  starting early asks for confirmation. Circles - also through a main task and its sub-tasks - are refused; a task
+  cannot wait for a mere proposal. A task you cannot open shows as "a task you cannot see" and stays when you edit.
+- **Timeline detail.** Milestones (diamonds), the first due date under bars whose date moved, today and target lines,
+  and a timeline of all projects on the Projects page and in the department view.
+- **Repeating tasks.** Daily, weekly or monthly (main tasks) - the next one is created when the current one is done;
+  a monthly task due on the 31st stays on month ends.
+- **@mentions** in comments notify that person (only people who can open the task).
+- **Morning summary e-mail.** With e-mail switched on, each person gets one e-mail at 08:30 (Monday to Saturday)
+  listing overdue work, what is due today and tomorrow and, for heads, the decisions waiting - only when there is
+  something to act on (`digest_time` in the server settings; IT Admin Guide chapter 8).
+- The Excel export also lists who helps, what a task waits for, the first due date, milestones and repeats.
+- After this update every app downloads its data once, because people now see more than before.
+
+## [1.0.2] - 2026-10-31
+
+Release tools: publish the server to the repository the company server updates itself from.
+
+- **Publishing the server.** New `release_server_to_git.bat` (also offered at the end of `release_to_git.bat`):
+  test-builds the server for Linux, replaces only the TaskFlow server files in IT's repository, shows the
+  changes and asks before pushing, then waits until the live server reports the new version.
+- **Server updates from a folder.** `taskflowctl update` also takes a folder with the server source (such as
+  a git clone), so an automatic update gets the database backup, build check and rollback of a manual one.
+- **Installer build.** `build_installer.bat` installs Zig 0.16.0; 0.17.0 is not published for Windows.
+- No changes to the desktop app or the server program beyond the version number.
+
 ## [1.0.1] - 2026-10-29
 
 Audit release: department drill-down for management, and the fixes from an independent review of every

@@ -12,7 +12,7 @@ void App::init_schema() {
   db.exec_script(R"SQL(
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 INSERT OR IGNORE INTO meta(key,value) VALUES('seq','0');
-INSERT OR IGNORE INTO meta(key,value) VALUES('schema','2');
+INSERT OR IGNORE INTO meta(key,value) VALUES('schema','2');  -- migrated below to the current version
 
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL,
@@ -120,11 +120,69 @@ CREATE TABLE IF NOT EXISTS revocations(
   created_at TEXT);
 CREATE INDEX IF NOT EXISTS ix_revocations_user ON revocations(user_id, seq);
 INSERT OR IGNORE INTO meta(key,value) VALUES('revocations_pruned_seq','0');
+
+-- v1.1: the people of a (non-routine) project - they see all of its work. Added by the owner / managers, or joined
+-- automatically ("auto") when one of them gives the person a task there; "removed" = taken off by hand: never re-joined
+-- automatically, only by adding them again
+CREATE TABLE IF NOT EXISTS project_members(
+  id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id), user_id INTEGER NOT NULL REFERENCES users(id),
+  active INTEGER DEFAULT 1, added_by INTEGER, created_at TEXT, seq INTEGER DEFAULT 0, auto INTEGER DEFAULT 0,
+  removed INTEGER DEFAULT 0, UNIQUE(project_id, user_id));
+CREATE INDEX IF NOT EXISTS ix_pm_user ON project_members(user_id, active);
+CREATE INDEX IF NOT EXISTS ix_pm_seq ON project_members(seq);
+-- v1.1: people who also work on a task (the assignee stays the one responsible)
+CREATE TABLE IF NOT EXISTS task_members(
+  id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), user_id INTEGER NOT NULL REFERENCES users(id),
+  active INTEGER DEFAULT 1, added_by INTEGER, created_at TEXT, seq INTEGER DEFAULT 0, UNIQUE(task_id, user_id));
+CREATE INDEX IF NOT EXISTS ix_tm_user ON task_members(user_id, active);
+CREATE INDEX IF NOT EXISTS ix_tm_task ON task_members(task_id);
+CREATE INDEX IF NOT EXISTS ix_tm_seq ON task_members(seq);
+-- v1.1: finish-to-start dependencies: task_id can start when depends_on is done
+CREATE TABLE IF NOT EXISTS task_deps(
+  id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), depends_on INTEGER NOT NULL REFERENCES tasks(id),
+  active INTEGER DEFAULT 1, created_at TEXT, seq INTEGER DEFAULT 0, UNIQUE(task_id, depends_on));
+CREATE INDEX IF NOT EXISTS ix_dep_task ON task_deps(task_id);
+CREATE INDEX IF NOT EXISTS ix_dep_on ON task_deps(depends_on);
+CREATE INDEX IF NOT EXISTS ix_dep_seq ON task_deps(seq);
 )SQL");
+  // ---- migrations
+  auto has_col = [&](const char* table, const char* col) {
+    for (auto& r : db.query(std::string("PRAGMA table_info(") + table + ")"))
+      if (jstr(r, "name") == col) return true;
+    return false;
+  };
+  Tx mig(db);  // all of a migration, or none of it
+  if (!has_col("project_members", "auto")) {
+    db.exec("ALTER TABLE project_members ADD COLUMN auto INTEGER DEFAULT 0");
+    db.exec("ALTER TABLE project_members ADD COLUMN removed INTEGER DEFAULT 0");
+    db.exec("UPDATE project_members SET auto=1 WHERE added_by IS NULL AND user_id NOT IN (SELECT owner_id FROM projects p "
+            "WHERE p.id=project_id AND owner_id IS NOT NULL)");
+  }
+  if (!has_col("tasks", "is_milestone")) db.exec("ALTER TABLE tasks ADD COLUMN is_milestone INTEGER DEFAULT 0");
+  if (!has_col("tasks", "recur")) db.exec("ALTER TABLE tasks ADD COLUMN recur TEXT DEFAULT ''");  // '', DAILY, WEEKLY, MONTHLY
+  if (!has_col("tasks", "recur_day")) {  // the day of the month a monthly series is due (31 stays 31 after February)
+    db.exec("ALTER TABLE tasks ADD COLUMN recur_day INTEGER DEFAULT 0");
+    db.exec("UPDATE tasks SET recur_day=CAST(substr(due_date,9,2) AS INTEGER) WHERE recur='MONTHLY' AND length(due_date)=10");
+  }
+  if (jint(db.one("SELECT CAST(value AS INTEGER) AS v FROM meta WHERE key='schema'"), "v") < 3) {
+    // v1.1: everyone already working in a project (and its owner) becomes a project member; every app downloads
+    // everything once, because people now see more than before
+    const std::string now = now_iso();
+    // (owners first: they are members in their own right; everyone else joined through their work)
+    db.exec("INSERT OR IGNORE INTO project_members(project_id,user_id,active,created_at,seq,auto) "
+            "SELECT id, owner_id, 1, ?, 0, 0 FROM projects WHERE is_routine=0 AND owner_id IS NOT NULL", {now});
+    db.exec("INSERT OR IGNORE INTO project_members(project_id,user_id,active,created_at,seq,auto) "
+            "SELECT DISTINCT t.project_id, t.assignee_id, 1, ?, 0, 1 FROM tasks t JOIN projects p ON p.id=t.project_id "
+            "WHERE p.is_routine=0 AND p.status<>'CLOSED' AND t.assignee_id IS NOT NULL "
+            "AND t.status NOT IN ('PROPOSED','REJECTED','CANCELLED')", {now});
+    db.exec("UPDATE users SET scope_ver=scope_ver+1");
+    db.exec("UPDATE meta SET value='3' WHERE key='schema'");
+  }
+  mig.commit();
   db.exec("INSERT OR IGNORE INTO meta(key,value) VALUES('company_name',?)", {cfg.company_name});
   db.exec("INSERT OR IGNORE INTO meta(key,value) VALUES('company_tagline',?)", {cfg.company_tagline});
   db.exec("INSERT OR IGNORE INTO meta(key,value) VALUES('created_at',?)", {now_iso()});
-  // future schema migrations go here:  if (schema < 3) { ALTER TABLE ...; UPDATE meta SET value='3' ... }
+  // future schema migrations go here:  if (schema < 4) { ...; UPDATE meta SET value='4' ... }
 }
 
 int64_t App::next_seq() {

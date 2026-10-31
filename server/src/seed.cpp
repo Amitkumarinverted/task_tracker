@@ -206,20 +206,32 @@ void App::seed_demo() {
         "Hook-up done, interlocks tested with the safety officer."});
   task({pLine, L2, rahul, rahul, "Commissioning checklist", "MEDIUM", "DONE", -12, -6, weld, "MANAGER", 0, 0, -7});
   int64_t trials = task({pLine, L2, sneha, rahul, "Weld parameter trials (30 samples)", "HIGH", "IN_PROGRESS", -5, 3, weld});
-  task({pLine, L2, manoj, rahul, "Operator SOP for station 2", "MEDIUM", "TODO", 1, 5, weld});
+  int64_t sop = task({pLine, L2, manoj, rahul, "Operator SOP for station 2", "MEDIUM", "TODO", 1, 5, weld});
 
   int64_t cyc = task({pLine, L2, sneha, rahul, "Cycle-time study for module stacking", "HIGH", "IN_PROGRESS", -14, 1});
   submit(cyc, "Study done for both shifts - average 41 s per module, bottleneck is the stacking jig.",
          "https://intranet.inverted.local/reports/line2-cycle-time.xlsx", 0);
   int64_t pfmea = task({pLine, L2, sneha, rahul, "Update PFMEA for the new welding cell", "MEDIUM", "IN_PROGRESS", -10, -2});
-  task({pLine, L2, manoj, rahul, "Operator training - shift B", "MEDIUM", "TODO", 3, 12});
+  int64_t training = task({pLine, L2, manoj, rahul, "Operator training - shift B", "MEDIUM", "TODO", 3, 12});
   int64_t dash = task({pLine, L2, rahul, vikram, "Line 2 daily output dashboard", "MEDIUM", "IN_PROGRESS", -8, 2});
   submit(dash, "Dashboard live on the shop-floor TV, updated every hour from the EOL tester.", "", -1);
   task({pLine, PRD, imran, vikram, "Line balancing simulation", "MEDIUM", "DONE", -18, -2, 0, "MANAGER", 0, 0, -3,
         "Simulation shows 1,180 packs/day with 2 extra operators."});
   int64_t l1 = task({routine("PRD"), L1, pooja, suresh, "Daily 5S audit - this week", "LOW", "IN_PROGRESS", -2, 3});
   task({routine("PRD"), L1, suresh, vikram, "Calibrate torque tools", "MEDIUM", "DONE", -25, -15, 0, "MANAGER", 0, 0, -16});
-  (void)l1;
+  int64_t walk = task({routine("PRD"), L2, manoj, rahul, "Weekly safety walk - Line 2", "MEDIUM", "TODO", 1, 2});
+  int64_t ramp = task({pLine, L2, rahul, vikram, "Line 2 at 1,200 packs per day", "HIGH", "TODO", 38, 40});
+  // v1.1: repeating work, a milestone, dependencies and a colleague helping
+  db.exec("UPDATE tasks SET recur='WEEKLY' WHERE id IN (?,?)", {l1, walk});
+  db.exec("UPDATE tasks SET is_milestone=1 WHERE id=?", {ramp});
+  auto wait_for = [&](int64_t t, int64_t on) {
+    db.insert("INSERT INTO task_deps(task_id,depends_on,active,created_at,seq) VALUES(?,?,1,?,?)", {t, on, TS(-3), next_seq()});
+  };
+  wait_for(sop, trials);       // the SOP needs the final weld parameters
+  wait_for(training, sop);     // training uses the SOP
+  wait_for(ramp, training);
+  db.insert("INSERT INTO task_members(task_id,user_id,active,added_by,created_at,seq) VALUES(?,?,1,?,?,?)",
+            {trials, manoj, rahul, TS(-4), next_seq()});
 
   // ------------------------------------------------------------------ Electronics (Arjun -> Rohan -> Nikhil)
   int64_t can = task({pGen3, FW, rohan, arjun, "BMS firmware: CAN protocol V2", "HIGH", "IN_PROGRESS", -21, 10});

@@ -12,7 +12,10 @@
 #    taskflowctl reset-password EMAIL   set a temporary password and print it
 #    taskflowctl fingerprint            print the certificate fingerprint for the desktop apps
 #    taskflowctl test-email ADDRESS     send a test e-mail with the [e-mail] settings
+#    taskflowctl digest                 send today's morning summary e-mails now (normally automatic)
 #    taskflowctl update PACKAGE.zip     install a new server version (backs up and rolls back on failure)
+#    taskflowctl update FOLDER          the same from a folder with the server source (e.g. a git clone -
+#                                       an automatic update after "git pull" should call this)
 #    taskflowctl edit                   edit the settings, then restart
 # =============================================================================
 set -euo pipefail
@@ -98,17 +101,28 @@ case "$cmd" in
     [ -n "${1:-}" ] || { echo "Usage: sudo taskflowctl test-email you@inverted.in"; exit 1; }
     as_service "$BIN" --config "$INI" --test-email "$1"
     ;;
+  digest)
+    need_root digest
+    as_service "$BIN" --config "$INI" --digest-now
+    ;;
   update)
     need_root update
     pkg="${1:-}"
-    [ -f "$pkg" ] || { echo "Usage: sudo taskflowctl update InvertedTaskFlow_Server_vX.Y.Z.zip"; exit 1; }
-    command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
+    [ -e "$pkg" ] || { echo "Usage: sudo taskflowctl update InvertedTaskFlow_Server_vX.Y.Z.zip   (or a folder with the server source, e.g. a git clone)"; exit 1; }
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    rc=0; unzip -q -o "$pkg" -d "$tmp" || rc=$?
-    [ "$rc" -le 1 ] || { echo "Could not unpack $pkg (unzip error $rc)."; exit 1; }   # 1 = warnings only
-    root="$(dirname "$(find "$tmp" -path '*/server/CMakeLists.txt' | head -1)")/.."
-    [ -f "$root/server/CMakeLists.txt" ] || { echo "This zip does not contain the server source."; exit 1; }
+    if [ -d "$pkg" ]; then
+      src="$pkg"            # a folder, e.g. the clone an automatic update has just pulled
+    else
+      command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
+      mkdir -p "$tmp/pkg"
+      rc=0; unzip -q -o "$pkg" -d "$tmp/pkg" || rc=$?
+      [ "$rc" -le 1 ] || { echo "Could not unpack $pkg (unzip error $rc)."; exit 1; }   # 1 = warnings only
+      src="$tmp/pkg"
+    fi
+    found="$(find "$src" -name .git -prune -o -path '*/server/CMakeLists.txt' -print | head -1 || true)"
+    [ -n "$found" ] || { echo "$pkg does not contain the server source (server/CMakeLists.txt)."; exit 1; }
+    root="$(dirname "$found")/.."
     echo "Building the new version..."
     mem_gb="$(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo)"; jobs="$(nproc)"
     [ "$mem_gb" -lt "$jobs" ] && jobs="$mem_gb"; [ "$jobs" -lt 1 ] && jobs=1
@@ -146,7 +160,7 @@ case "$cmd" in
     health >/dev/null && echo "Restarted with the new settings." || { echo "Not responding - check: taskflowctl logs"; }
     ;;
   *)
-    sed -n '2,20p' "$0"
+    sed -n '2,21p' "$0"
     exit 1
     ;;
 esac
